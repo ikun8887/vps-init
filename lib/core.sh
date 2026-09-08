@@ -2,6 +2,7 @@
 YES=0 KEEP_SSH=0 SSH_PORT=auto SWAP_MB=auto NO_SWAP=0 INSTALL=0 UPDATES=0
 CPU_PERFORMANCE=0 ZRAM=0 DOCKER_LOG=0 HOSTNAME_NEW='' TIMEZONE_NEW=''
 FAIL2BAN=0
+ADMIN_USER='' PUBLIC_KEY='' DISABLE_PASSWORD=0 DISABLE_ROOT=0
 STATE=/var/lib/vps-init
 declare -a ALLOW=()
 say() { printf '%s\n' "$*"; }
@@ -22,7 +23,9 @@ parse_options() {
             --zram) ZRAM=1;;
             --docker-log-limit) DOCKER_LOG=1;;
             --fail2ban) FAIL2BAN=1;;
-            --ssh-port|--swap-mb|--allow|--hostname|--timezone)
+            --disable-password-login) DISABLE_PASSWORD=1;;
+            --disable-root-login) DISABLE_ROOT=1;;
+            --ssh-port|--swap-mb|--allow|--hostname|--timezone|--admin-user|--public-key)
                 [[ $# -ge 2 ]] || die "$1 缺少参数"
                 case $1 in
                     --ssh-port)
@@ -35,6 +38,8 @@ parse_options() {
                     --allow) validate_allow "$2"; ALLOW+=("$2");;
                     --hostname) [[ $2 =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]{0,61}[a-zA-Z0-9])?$ ]] || die '无效主机名'; HOSTNAME_NEW=$2;;
                     --timezone) [[ $2 =~ ^[a-zA-Z0-9_+-]+(/[a-zA-Z0-9_+-]+)*$ ]] || die '无效时区'; TIMEZONE_NEW=$2;;
+                    --admin-user) [[ $2 =~ ^[a-z_][a-z0-9_-]{0,30}$ && $2 != root ]] || die '需要非 root 的合法管理员用户名'; ADMIN_USER=$2;;
+                    --public-key) PUBLIC_KEY=$2;;
                 esac
                 shift;;
             *) die "未知选项：$1";;
@@ -42,6 +47,10 @@ parse_options() {
         shift
     done
     (( ! ZRAM || ! NO_SWAP )) || die '--zram 与 --no-swap 冲突'
+    if [[ -n $ADMIN_USER || -n $PUBLIC_KEY ]] || (( DISABLE_PASSWORD || DISABLE_ROOT )); then
+        [[ -n $ADMIN_USER && -n $PUBLIC_KEY ]] || die '登录加固需要同时提供 --admin-user 与 --public-key'
+        [[ -f $PUBLIC_KEY && -r $PUBLIC_KEY ]] || die '公钥文件不可读取'
+    fi
 }
 validate_allow() {
     local proto=${1%%:*} list=${1#*:} p
@@ -172,6 +181,7 @@ show_plan() {
     say "安装工具=$INSTALL；安全更新=$UPDATES；CPU performance=$CPU_PERFORMANCE；Docker 日志=$DOCKER_LOG。"
     say '适用模块才执行；已有服务/转发/防火墙冲突会跳过并说明；不会自动重启机器。'
     say 'SSH 变更需从新端口重新登录确认；云安全组和 NAT 映射需由你放行。'
+    if [[ -n $ADMIN_USER ]]; then say "登录加固：管理员 $ADMIN_USER，配置公钥和免密码 sudo；新公钥登录确认后才关闭指定认证方式。"; fi
 }
 verify_managed() {
     local file key wanted actual failed=0 pending
@@ -231,7 +241,10 @@ rollback() {
         if [[ $INIT == systemd ]]; then systemctl disable --now vps-init-cpu.service
         else rc-service vps-init-cpu stop; rc-update del vps-init-cpu default; fi
     fi
-    if [[ -f $TX/nft.service ]]; then systemctl disable vps-init-firewall.service; fi
+    if [[ -f $TX/nft.service ]]; then
+        if [[ $INIT == systemd ]]; then systemctl disable vps-init-firewall.service
+        else rc-update del vps-init-firewall default; fi
+    fi
     if [[ -f $TX/swap.created ]]; then
         local swapfile; swapfile=$(cat "$TX/swap.created")
         if grep -Fq "$swapfile " /proc/swaps || grep -Fq "$swapfile" /proc/swaps; then swapoff "$swapfile" || die '内存不足，无法安全 swapoff；未删除交换文件'; fi
@@ -256,5 +269,6 @@ rollback() {
         fi
     fi
     touch "$TX/rolled-back"
+    [[ ! -f $TX/user.created ]] || say "新建账号 $(cat "$TX/user.created") 及其目录保留；本事务的公钥和 sudo 配置已恢复。"
     say '配置回滚完成；软件包更新、已轮转日志和外部状态不支持撤销。'
 }

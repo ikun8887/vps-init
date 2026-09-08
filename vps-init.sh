@@ -33,6 +33,10 @@ VPS Init 0.1.0
   --zram                 使用 zram 替代自动磁盘 swap（需要内核支持）
   --docker-log-limit      配置 Docker 新容器默认日志轮转（不重启 Docker）
   --fail2ban              为已安装的 Fail2ban 配置 SSH 登录失败封禁
+  --admin-user 用户名     配置非 root 公钥管理员（不存在则创建，授予免密码 sudo）
+  --public-key 文件       与 --admin-user 配合，提供你自己的单个公钥
+  --disable-password-login  新管理员通过公钥验证后，关闭全局密码/交互式认证
+  --disable-root-login    新管理员通过公钥验证后，关闭全局 root 登录
   --hostname 名称         设置主机名（需 hostnamectl）
   --timezone 时区         设置时区（需 timedatectl）
 EOF

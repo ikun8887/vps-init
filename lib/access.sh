@@ -39,6 +39,16 @@ prepare_recovery() {
     mkdir -p "$TX/tool/lib"
     cp "$BASE/vps-init.sh" "$TX/tool/"
     cp "$BASE"/lib/*.sh "$TX/tool/lib/"
+    if [[ $INIT == openrc ]]; then
+        local result job
+        result=$(printf '/bin/bash %s/tool/vps-init.sh rollback %s >>%s/recovery.log 2>&1\n' "$TX" "$TXID" "$TX" | env -i PATH="$PATH" HOME=/root LC_ALL=C at now + 5 minutes 2>&1) || die 'at 恢复任务创建失败'
+        job=$(printf '%s\n' "$result" | awk '$1=="job" {print $2}')
+        [[ $job =~ ^[0-9]+$ ]] || die '无法确认 at 恢复任务 ID'
+        printf '%s\n' "$job" > "$TX/at.job"
+        atq | awk '{print $1}' | grep -Fxq "$job" || die 'at 恢复任务不在队列'
+        touch "$TX/access.pending"
+        return
+    fi
     local unit="vps-init-recovery-$TXID"
     cat > "/etc/systemd/system/$unit.service" <<EOF
 [Unit]
@@ -63,6 +73,14 @@ EOF
     touch "$TX/access.pending"
 }
 stop_recovery() {
+    if [[ -f $TX/at.job ]]; then
+        local job
+        job=$(cat "$TX/at.job")
+        [[ $job =~ ^[0-9]+$ ]] || die 'at 任务记录无效'
+        if atq | awk '{print $1}' | grep -Fxq "$job"; then atrm "$job"; fi
+        rm -f "$TX/access.pending"
+        return
+    fi
     local unit="vps-init-recovery-$TXID"
     if [[ -f /etc/systemd/system/$unit.timer ]]; then
         systemctl disable --now "$unit.timer"
@@ -73,24 +91,35 @@ stop_recovery() {
 }
 configure_access() {
     (( ! LIMITED )) || { skip '受限容器不接管 SSH 或防火墙'; return; }
-    [[ $INIT == systemd ]] || { skip 'OpenRC 访问控制暂未具备经过验证的独立恢复机制，保留 SSH/防火墙'; return; }
+    if [[ $INIT == openrc ]]; then
+        if ! has at || ! has atq || ! has atrm || ! rc-service atd status >/dev/null 2>&1; then
+            skip 'OpenRC 访问迁移需要已运行的 atd 和 at 工具作为独立恢复机制'; return
+        fi
+        rc-update show default | grep -qE '^[[:space:]]*atd[[:space:]]' || { skip 'atd 未在默认运行级别启用，不能保证重启后恢复'; return; }
+    fi
     if ! has sshd || ! has ss; then skip '缺少 sshd 或 ss'; return; fi
     [[ -f /etc/ssh/sshd_config ]] || { skip '未找到 OpenSSH 配置'; return; }
     sshd -t
     local service=sshd
-    if systemctl is-active --quiet ssh.service; then service=ssh
-    elif ! systemctl is-active --quiet sshd.service; then skip 'SSH 服务未运行，不启动新的远程访问服务'; return; fi
     local socket=''
-    if systemctl is-active --quiet ssh.socket; then socket=ssh.socket
-    elif systemctl is-active --quiet sshd.socket; then socket=sshd.socket; fi
+    if [[ $INIT == systemd ]]; then
+        if systemctl is-active --quiet ssh.service; then service=ssh
+        elif ! systemctl is-active --quiet sshd.service; then skip 'SSH 服务未运行，不启动新的远程访问服务'; return; fi
+        if systemctl is-active --quiet ssh.socket; then socket=ssh.socket
+        elif systemctl is-active --quiet sshd.socket; then socket=sshd.socket; fi
+    elif ! rc-service sshd status >/dev/null 2>&1; then skip 'sshd 未运行'; return; fi
     if [[ -n $socket && $(systemctl show "$service.service" -p KillMode --value) != process ]]; then
         skip 'socket 模式下服务 KillMode 非 process，无法保证保留现有 SSH 会话'; return
     fi
     firewall_detect
     [[ $FW != unknown && $FW != none ]] || { skip '已有自定义防火墙或无支持的工具，不接管 SSH/防火墙'; return; }
     if [[ $FW == nft ]]; then
-        if [[ -f /etc/nftables.conf ]] && grep -qvE '^[[:space:]]*(#.*)?$|^[[:space:]]*flush ruleset[[:space:]]*$' /etc/nftables.conf; then
-            skip '发现已有持久化 nftables 配置，不覆盖其开机策略'; return
+        if [[ $INIT == systemd ]]; then
+            if systemctl is-enabled --quiet nftables.service || systemctl is-active --quiet nftables.service; then
+                skip '已有启用的 nftables 服务，不叠加开机规则管理器'; return
+            fi
+        elif rc-service nftables status >/dev/null 2>&1; then
+            skip '已有 nftables 服务，不叠加规则管理器'; return
         fi
         if has iptables-save && iptables-save | grep -q '^-A'; then skip '检测到 iptables 规则，不创建冲突的 nftables 策略'; return; fi
         if has docker && docker info >/dev/null 2>&1; then skip '检测到 Docker，由现有容器防火墙策略管理'; return; fi
@@ -105,8 +134,10 @@ configure_access() {
         port_valid "$target" || die '已管理 SSH 端口记录损坏'
         if [[ $SSH_PORT != auto && $SSH_PORT != "$target" ]]; then die '已有管理端口；请先回滚之前的端口事务'; fi
         say "保留本工具已管理端口 $target"
-        skip '访问配置已管理，本次不重建防火墙或重新随机端口'
-        return
+        if [[ -z $ADMIN_USER ]]; then
+            skip '访问配置已管理，本次不重建防火墙或重新随机端口'
+            return
+        fi
     elif [[ $target == auto ]]; then
         local tries=0
         while :; do
@@ -142,6 +173,7 @@ configure_access() {
         if nft list table inet vps_init > "$TX/nft.before" 2>/dev/null; then :; else rm -f "$TX/nft.before"; fi
     fi
     prepare_recovery
+    if [[ -n $ADMIN_USER ]]; then prepare_identity; fi
     if [[ $FW == nft ]]; then
         build_nft "$target" "${old_ports[@]}"
     else
@@ -159,7 +191,11 @@ configure_access() {
     # Port 为可重复项。先剔除全局 Port，再在首个 Match 之前加入过渡端口。
     # 不尝试重写第三方 Include 里的 Port；确认阶段用 sshd -T 检测残留。
     { printf 'Port %s\n' "$target"; for p in "${old_ports[@]}"; do [[ $p == "$target" ]] || printf 'Port %s\n' "$p"; done
+      if [[ -n $ADMIN_USER ]]; then printf 'ExposeAuthInfo yes\n'; fi
       awk 'BEGIN {matchblock=0} /^[[:space:]]*[Mm][Aa][Tt][Cc][Hh][[:space:]]/ {matchblock=1} !matchblock && /^[[:space:]]*[Pp][Oo][Rr][Tt][[:space:]]/ {next} {print}' /etc/ssh/sshd_config
+      if [[ -n $ADMIN_USER ]] && ! grep -Fxq "# VPS-INIT USER $ADMIN_USER" /etc/ssh/sshd_config; then
+          printf '\n# VPS-INIT USER %s\nMatch User %s\n    PubkeyAuthentication yes\n    AuthorizedKeysFile /etc/ssh/vps-init-authorized-keys/%%u .ssh/authorized_keys .ssh/authorized_keys2\n' "$ADMIN_USER" "$ADMIN_USER"
+      fi
     } > "$TX/sshd.new"
     sshd -t -f "$TX/sshd.new"
     write_file /etc/ssh/sshd_config < "$TX/sshd.new"
@@ -174,6 +210,42 @@ configure_access() {
     say "[待确认] 请在 5 分钟内从新端口 $target 重新 SSH 登录，然后执行："
     say "sudo bash $BASE/vps-init.sh confirm-ssh $TXID"
     say '云安全组/NAT 未放行时保留当前会话；超时恢复整个配置事务。'
+    if [[ -n $ADMIN_USER ]]; then
+        say "请以 $ADMIN_USER 使用刚提供的公钥登录，并用 sudo --preserve-env=SSH_CONNECTION,SSH_USER_AUTH 执行确认。"
+    fi
+}
+prepare_identity() {
+    if ! has ssh-keygen || ! has visudo || ! has getent; then die '公钥管理员需要 ssh-keygen、sudo/visudo 与 getent'; fi
+    [[ $(stat -c %s "$PUBLIC_KEY") -le 16384 ]] || die '公钥文件过大'
+    [[ $(awk 'NF {n++} END {print n+0}' "$PUBLIC_KEY") == 1 ]] || die '仅接受一个公钥'
+    grep -qE '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)) [A-Za-z0-9+/]+={0,3}([[:space:]].*)?$' "$PUBLIC_KEY" || die '需要 OpenSSH 公钥，不能提供私钥或 authorized_keys 选项'
+    ssh-keygen -l -f "$PUBLIC_KEY" >/dev/null
+    awk 'NF {print $1 " " $2}' "$PUBLIC_KEY" > "$TX/identity.key"
+    printf '%s\n' "$ADMIN_USER" > "$TX/identity.user"
+    printf '%s\n' "$DISABLE_PASSWORD" > "$TX/identity.disable-password"
+    printf '%s\n' "$DISABLE_ROOT" > "$TX/identity.disable-root"
+    if ! getent passwd "$ADMIN_USER" >/dev/null; then
+        if has useradd; then useradd -m -s /bin/bash -p '*' "$ADMIN_USER"
+        else adduser -D -s /bin/bash "$ADMIN_USER"; printf '%s:*\n' "$ADMIN_USER" | chpasswd -e; fi
+        printf '%s\n' "$ADMIN_USER" > "$TX/user.created"
+    fi
+    [[ $(id -u "$ADMIN_USER") != 0 ]] || die '管理员不能是 UID 0 的别名'
+    # 公钥由 root 管理，避免沿用户可写 home 目录进行特权文件写入。
+    local keyfile="/etc/ssh/vps-init-authorized-keys/$ADMIN_USER"
+    mkdir -p /etc/ssh/vps-init-authorized-keys
+    [[ ! -L /etc/ssh/vps-init-authorized-keys ]] || die '公钥目录不可为符号链接'
+    [[ $(stat -c %u /etc/ssh/vps-init-authorized-keys) == 0 ]] || die '公钥目录必须属于 root'
+    [[ ! -L $keyfile ]] || die '公钥文件不可为符号链接'
+    chmod 755 /etc/ssh/vps-init-authorized-keys
+    if [[ -f $keyfile ]]; then cat "$keyfile" > "$TX/keys.new"; else : > "$TX/keys.new"; fi
+    if ! grep -Fxq "$(cat "$TX/identity.key")" "$TX/keys.new"; then cat "$TX/identity.key" >> "$TX/keys.new"; fi
+    write_file "$keyfile" < "$TX/keys.new"
+    chmod 644 "$keyfile"
+    printf '%s ALL=(ALL:ALL) NOPASSWD: ALL\n' "$ADMIN_USER" > "$TX/sudo.new"
+    visudo -cf "$TX/sudo.new"
+    write_file "/etc/sudoers.d/60-vps-init-$ADMIN_USER" < "$TX/sudo.new"
+    chmod 440 "/etc/sudoers.d/60-vps-init-$ADMIN_USER"
+    visudo -c
 }
 prepare_socket() {
     local socket=$1 target=$2 address kind listen
@@ -240,11 +312,34 @@ confirm_ssh() {
     local_port=${SSH_CONNECTION:-}
     local_port=${local_port##* }
     [[ -n ${SSH_CONNECTION:-} && $local_port == "$target" ]] || die '请从新端口登录，并使用 sudo --preserve-env=SSH_CONNECTION 执行确认'
+    if [[ -f $TX/identity.user ]]; then
+        local admin expected
+        admin=$(cat "$TX/identity.user")
+        [[ ${SUDO_USER:-} == "$admin" ]] || die '请用新管理员账号登录并通过 sudo 确认'
+        [[ -n ${SSH_USER_AUTH:-} && -f $SSH_USER_AUTH ]] || die '缺少 SSH_USER_AUTH，请保留该环境变量'
+        expected=$(cat "$TX/identity.key")
+        grep -Fq "publickey $expected" "$SSH_USER_AUTH" || die '本次会话未使用指定公钥认证'
+    fi
     cmp -s /etc/ssh/sshd_config "$TX/after/etc/ssh/sshd_config" || die 'SSH 配置在事务后变化，拒绝覆盖'
     { printf 'Port %s\n' "$target"
+      if [[ -f $TX/identity.disable-password && $(cat "$TX/identity.disable-password") == 1 ]]; then printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n'; fi
+      if [[ -f $TX/identity.disable-root && $(cat "$TX/identity.disable-root") == 1 ]]; then printf 'PermitRootLogin no\n'; fi
       awk 'BEGIN {matchblock=0} /^[[:space:]]*[Mm][Aa][Tt][Cc][Hh][[:space:]]/ {matchblock=1} !matchblock && /^[[:space:]]*[Pp][Oo][Rr][Tt][[:space:]]/ {next} {print}' /etc/ssh/sshd_config
     } > "$TX/sshd.confirm"
     sshd -t -f "$TX/sshd.confirm"
+    if [[ -f $TX/identity.user ]]; then
+        local addr=${SSH_CONNECTION%% *}
+        sshd -T -f "$TX/sshd.confirm" -C "user=$admin,host=$(hostname),addr=$addr" > "$TX/identity.effective"
+        grep -q '^pubkeyauthentication yes$' "$TX/identity.effective" || die 'Match 配置禁用了新管理员公钥登录'
+        if [[ $(cat "$TX/identity.disable-password") == 1 ]]; then
+            grep -q '^passwordauthentication no$' "$TX/identity.effective" || die 'Match 配置仍允许管理员密码登录'
+            grep -q '^kbdinteractiveauthentication no$' "$TX/identity.effective" || die 'Match 配置仍允许交互式登录'
+            grep -qE '^authenticationmethods (any|publickey)$' "$TX/identity.effective" || die '现有多因素认证策略不能直接关闭密码，请人工整合'
+        fi
+        if [[ $(cat "$TX/identity.disable-root") == 1 ]]; then
+            sshd -T -f "$TX/sshd.confirm" -C "user=root,host=$(hostname),addr=$addr" | grep -q '^permitrootlogin no$' || die 'Match 配置仍允许此来源的 root 登录'
+        fi
+    fi
     local p
     while read -r p; do [[ $p == "$target" ]] || die "Include 中仍有端口 $p，请人工整理后再迁移"; done < <(sshd -T -f "$TX/sshd.confirm" | awk '$1=="port" {print $2}')
     write_file /etc/ssh/sshd_config < "$TX/sshd.confirm"
@@ -273,20 +368,7 @@ confirm_ssh() {
         nft -f "$TX/nft.confirm"
         nft list table inet vps_init > "$TX/nft.after"
         write_file /etc/nftables-vps-init.conf < "$TX/nft.after"
-        write_file /etc/systemd/system/vps-init-firewall.service <<'EOF'
-[Unit]
-Description=VPS Init firewall
-After=network-pre.target
-Before=network.target
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/sbin/nft -f /etc/nftables-vps-init.conf
-[Install]
-WantedBy=multi-user.target
-EOF
-        systemctl daemon-reload
-        systemctl enable vps-init-firewall.service
+        install_firewall_persistence
         touch "$TX/nft.service"
     elif [[ $FW == firewalld && -f $TX/firewalld.added ]]; then
         local proto
@@ -297,6 +379,51 @@ EOF
     stop_recovery
     touch "$TX/access.confirmed"
     say "SSH 新端口 $target 已确认。"
+}
+install_firewall_persistence() {
+    write_file /usr/local/sbin/vps-init-firewall <<'EOF'
+#!/bin/sh
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+if [ "${1:-start}" = stop ]; then
+    if nft list table inet vps_init >/dev/null 2>&1; then nft delete table inet vps_init; fi
+    exit 0
+fi
+tmp=$(mktemp /run/vps-init-nft.XXXXXX)
+trap 'rm -f "$tmp"' EXIT
+if nft list table inet vps_init >/dev/null 2>&1; then printf 'delete table inet vps_init\n' >> "$tmp"; fi
+cat /etc/nftables-vps-init.conf >> "$tmp"
+nft --check -f "$tmp"
+nft -f "$tmp"
+EOF
+    chmod 700 /usr/local/sbin/vps-init-firewall
+    if [[ $INIT == systemd ]]; then
+        write_file /etc/systemd/system/vps-init-firewall.service <<'EOF'
+[Unit]
+Description=VPS Init firewall
+After=network-pre.target
+Before=network.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/vps-init-firewall start
+ExecStop=/usr/local/sbin/vps-init-firewall stop
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+        systemctl enable vps-init-firewall.service
+    else
+        write_file /etc/init.d/vps-init-firewall <<'EOF'
+#!/sbin/openrc-run
+description="VPS Init firewall"
+depend() { need localmount; before net; }
+start() { /usr/local/sbin/vps-init-firewall start; }
+stop() { /usr/local/sbin/vps-init-firewall stop; }
+EOF
+        chmod 755 /etc/init.d/vps-init-firewall
+        rc-update add vps-init-firewall default
+    fi
 }
 rollback_access() {
     local fw='' p proto service
