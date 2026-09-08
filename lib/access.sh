@@ -338,7 +338,9 @@ confirm_ssh() {
             grep -qE '^authenticationmethods (any|publickey)$' "$TX/identity.effective" || die '现有多因素认证策略不能直接关闭密码，请人工整合'
         fi
         if [[ $(cat "$TX/identity.disable-root") == 1 ]]; then
-            sshd -T -f "$TX/sshd.confirm" -C "user=root,host=$(hostname),addr=$addr" | grep -q '^permitrootlogin no$' || die 'Match 配置仍允许此来源的 root 登录'
+            # 完整读取配置，避免 grep -q 提前退出使 pipefail 将 SIGPIPE 当成验证失败。
+            sshd -T -f "$TX/sshd.confirm" -C "user=root,host=$(hostname),addr=$addr" > "$TX/root.effective"
+            grep -q '^permitrootlogin no$' "$TX/root.effective" || die 'Match 配置仍允许此来源的 root 登录'
         fi
     fi
     local p

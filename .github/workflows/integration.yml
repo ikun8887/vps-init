@@ -3,6 +3,16 @@ on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
 jobs:
+  memory-and-nft:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: sudo apt-get update && sudo apt-get install -y nftables iproute2
+      - name: 临时 VM 交换空间验证
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT env VPS_INIT_DISPOSABLE_VM=1 bash tests/integration-memory.sh
+      - name: 隔离网络命名空间的 nftables 验证
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT env VPS_INIT_DISPOSABLE_VM=1 bash tests/integration-nft.sh
   access:
     strategy:
       fail-fast: false

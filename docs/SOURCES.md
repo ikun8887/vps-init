@@ -28,4 +28,16 @@
 | [Ubuntu 生命周期](https://ubuntu.com/about/release-cycle) | 维护版本范围 |
 | [Alpine 发布](https://alpinelinux.org/releases/) | 维护版本范围 |
 
-用户提供的 [NodeSeek 帖子](https://www.nodeseek.com/post-724033-1) 多次读取失败，搜索未取得正文。未将其内容作为已核对依据，也没有执行该帖可能引用的脚本。后续仍需补充核对。
+用户提供的 [NodeSeek 帖子《【保姆级】VPS 拿到手后必做的初始化配置脚本v2》](https://www.nodeseek.com/post-724033-1) 已通过浏览器读取正文；此前网页检索工具访问失败。
+
+采用其基础设置、交换空间、日志、BBR、SSH 与登录防护的功能分类，并作以下调整：
+
+- 以运行时内核能力确认 BBR，不仅判断版本号；不直接追加重复 sysctl。
+- SSH 端口采用双入口、有效配置检查和独立恢复机制，处理 socket activation。
+- Fail2ban 读取当前 SSH 端口，避免改端口后封禁规则仍针对默认端口。
+- 日志使用独立配置片段，保留原配置备份；不立即删除历史日志。
+- zram/swap 自行实现，不运行文章引用的浮动分支脚本。
+
+帖子还介绍 WARP、Docker 安装及外部跑分/解锁工具。这些会改变路由、安装业务环境或向外部服务发送测试流量，未作为初始化优化的默认动作，也未对这些外部项目作无后门保证。当前工具不引用或运行其代码。
+
+[OpenSSH 认证信息回归测试](https://github.com/openssh/openssh-portable/blob/master/regress/authinfo.sh) 用于核对 `ExposeAuthInfo` / `SSH_USER_AUTH` 的公钥登录验证方法。
