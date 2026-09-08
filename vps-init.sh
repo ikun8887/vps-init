@@ -13,7 +13,7 @@ source "$BASE/lib/access.sh"
 
 usage() {
     cat <<'EOF'
-VPS Init 0.1.0
+VPS Init 0.1.0-beta.1
 用法：sudo bash vps-init.sh <命令> [选项]
   check                  只读环境检查
   plan                   一键优化预览（默认）

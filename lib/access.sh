@@ -1,4 +1,32 @@
 #!/usr/bin/env bash
+assert_simple_auth_policy() {
+    # 全局禁用无法靠抽样 sshd -T 证明。只接受无既有 Match 的配置树。
+    # Include 仅解析简单路径语法；复杂引用明确拒绝，不猜测 OpenSSH 的解析结果。
+    local file=$1 depth=${2:-0} line keyword rest pattern child
+    local -a patterns=() children=()
+    (( depth < 16 )) || die 'SSH Include 层级过深或循环，不能自动加固'
+    [[ -f $file && -r $file ]] || die "SSH 配置不可读取：$file"
+    while IFS= read -r line || [[ -n $line ]]; do
+        line=${line%%#*}
+        [[ $line =~ ^[[:space:]]*$ ]] && continue
+        [[ $line =~ ^[[:space:]]*([[:alpha:]]+)[[:space:]]*=?[[:space:]]*(.*)$ ]] || die "不能安全解析 SSH 配置行：$file"
+        keyword=${BASH_REMATCH[1],,}; rest=${BASH_REMATCH[2]}
+        case $keyword in
+            match) die "检测到既有 Match 条件：$file；请人工整合全局登录禁用策略";;
+            include)
+                IFS=$' \t' read -r -a patterns <<< "$rest"
+                (( ${#patterns[@]} )) || die 'SSH Include 缺少路径'
+                for pattern in "${patterns[@]}"; do
+                    [[ $pattern =~ ^[a-zA-Z0-9_./*?+-]+$ ]] || die "不自动解析复杂 SSH Include 路径：$file"
+                    [[ $pattern == /* ]] || pattern="/etc/ssh/$pattern"
+                    mapfile -t children < <(compgen -G "$pattern" || true)
+                    for child in "${children[@]}"; do assert_simple_auth_policy "$child" "$((depth+1))"; done
+                done
+                ;;
+        esac
+    done < "$file"
+}
+
 firewall_detect() {
     FW=none
     if has firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then FW=firewalld
@@ -100,6 +128,7 @@ configure_access() {
     if ! has sshd || ! has ss; then skip '缺少 sshd 或 ss'; return; fi
     [[ -f /etc/ssh/sshd_config ]] || { skip '未找到 OpenSSH 配置'; return; }
     sshd -t
+    if (( DISABLE_PASSWORD || DISABLE_ROOT )); then assert_simple_auth_policy /etc/ssh/sshd_config; fi
     local service=sshd
     local socket=''
     if [[ $INIT == systemd ]]; then
@@ -322,6 +351,11 @@ confirm_ssh() {
         grep -Fq "publickey $expected" "$SSH_USER_AUTH" || die '本次会话未使用指定公钥认证'
     fi
     cmp -s /etc/ssh/sshd_config "$TX/after/etc/ssh/sshd_config" || die 'SSH 配置在事务后变化，拒绝覆盖'
+    if [[ -f $TX/identity.user ]] && { [[ $(cat "$TX/identity.disable-password") == 1 ]] || [[ $(cat "$TX/identity.disable-root") == 1 ]]; }; then
+        # 主配置与本事务生成内容一致；重新检查原主配置引用的当前 Include，
+        # 避免等待确认期间增加条件认证。工具自己添加的 Match 仅设置公钥路径。
+        assert_simple_auth_policy "$TX/files/etc/ssh/sshd_config"
+    fi
     { printf 'Port %s\n' "$target"
       if [[ -f $TX/identity.disable-password && $(cat "$TX/identity.disable-password") == 1 ]]; then printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n'; fi
       if [[ -f $TX/identity.disable-root && $(cat "$TX/identity.disable-root") == 1 ]]; then printf 'PermitRootLogin no\n'; fi
@@ -372,10 +406,14 @@ confirm_ssh() {
         nft list table inet vps_init > "$TX/nft.after"
         write_file /etc/nftables-vps-init.conf < "$TX/nft.after"
         install_firewall_persistence
-        touch "$TX/nft.service"
     elif [[ $FW == firewalld && -f $TX/firewalld.added ]]; then
         local proto
-        while IFS=$'\t' read -r proto p; do firewall-cmd --permanent --add-port="$p/$proto"; done < "$TX/firewalld.added"
+        while IFS=$'\t' read -r proto p; do
+            if ! firewall-cmd --permanent --query-port="$p/$proto" >/dev/null; then
+                printf '%s\t%s\n' "$proto" "$p" >> "$TX/firewalld.permanent-added"
+                firewall-cmd --permanent --add-port="$p/$proto"
+            fi
+        done < "$TX/firewalld.added"
         say '既有防火墙旧端口规则保留；SSH 已停止在旧端口监听。'
     fi
     write_file /etc/ssh/vps-init-port <<< "$target"
@@ -401,6 +439,7 @@ nft -f "$tmp"
 EOF
     chmod 700 /usr/local/sbin/vps-init-firewall
     if [[ $INIT == systemd ]]; then
+        [[ -f /etc/systemd/system/vps-init-firewall.service ]] || touch "$TX/nft.service"
         write_file /etc/systemd/system/vps-init-firewall.service <<'EOF'
 [Unit]
 Description=VPS Init firewall
@@ -417,6 +456,7 @@ EOF
         systemctl daemon-reload
         systemctl enable vps-init-firewall.service
     else
+        [[ -f /etc/init.d/vps-init-firewall ]] || touch "$TX/nft.service"
         write_file /etc/init.d/vps-init-firewall <<'EOF'
 #!/sbin/openrc-run
 description="VPS Init firewall"
@@ -433,16 +473,22 @@ rollback_access() {
     [[ ! -f $TX/firewall.kind ]] || fw=$(cat "$TX/firewall.kind")
     case $fw in
         nft)
-            if nft list table inet vps_init >/dev/null 2>&1; then nft delete table inet vps_init; fi
-            [[ ! -f $TX/nft.before ]] || nft -f "$TX/nft.before"
+            {
+                if nft list table inet vps_init >/dev/null 2>&1; then printf 'delete table inet vps_init\n'; fi
+                if [[ -f $TX/nft.before ]]; then cat "$TX/nft.before"; fi
+            } > "$TX/nft.restore"
+            nft --check -f "$TX/nft.restore"
+            nft -f "$TX/nft.restore"
             ;;
         ufw) ufw reload;;
         firewalld)
             if [[ -f $TX/firewalld.added ]]; then
                 while IFS=$'\t' read -r proto p; do
                     firewall-cmd --remove-port="$p/$proto"
-                    if [[ -f $TX/access.confirmed ]]; then firewall-cmd --permanent --remove-port="$p/$proto"; fi
                 done < "$TX/firewalld.added"
+            fi
+            if [[ -f $TX/firewalld.permanent-added ]]; then
+                while IFS=$'\t' read -r proto p; do firewall-cmd --permanent --remove-port="$p/$proto"; done < "$TX/firewalld.permanent-added"
             fi;;
     esac
     if [[ -f $TX/ssh.service ]]; then

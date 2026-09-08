@@ -23,7 +23,7 @@
 | [nftables 手册](https://netfilter.org/projects/nftables/manpage.html) | 规则检查与应用 |
 | [nftables 原子更新](https://wiki.nftables.org/wiki-nftables/index.php/Atomic_rule_replacement) | 独立表更新，避免清空全局规则 |
 | [systemd-run](https://manpages.ubuntu.com/manpages/jammy/man1/systemd-run.1.html) | 独立于 SSH 的恢复任务设计参考 |
-| [Fail2ban](https://github.com/fail2ban/fail2ban) | 待实现的登录封禁功能参考 |
+| [Fail2ban](https://github.com/fail2ban/fail2ban) | 登录封禁功能及配置参考 |
 | [Debian 发布](https://www.debian.org/releases/) | 维护版本范围 |
 | [Ubuntu 生命周期](https://ubuntu.com/about/release-cycle) | 维护版本范围 |
 | [Alpine 发布](https://alpinelinux.org/releases/) | 维护版本范围 |

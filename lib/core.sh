@@ -174,6 +174,7 @@ set_sysctl() {
     if sysctl -q -w "$key=$value"; then
         printf '%s = %s\n' "$key" "$value" >> "$SYSCTL_TEMP"
     else
+        printf '%s\n' "$key" >> "$TX/sysctl.failed"
         skip "无权设置 $key，未持久化"
     fi
 }
@@ -240,17 +241,21 @@ on_error() {
 }
 rollback() {
     [[ ! -e $TX/rolled-back ]] || die '事务已经回滚'
-    local target key value conflict=0
+    local target key value conflict=0 tmp
     # 先检查所有文件，避免发现后续人工修改时已恢复了一半。
     while IFS= read -r target; do
         if [[ -e $TX/after$target ]] && ! cmp -s "$target" "$TX/after$target"; then
+            # 允许恢复过程重试，也允许管理员已自行恢复到原始内容。
+            if [[ -e $TX/files$target ]] && cmp -s "$target" "$TX/files$target"; then continue; fi
+            if [[ ! -e $TX/files$target && ! -e $target && ! -L $target ]]; then continue; fi
             say "[冲突] $target 已在事务后变化，拒绝覆盖"; conflict=1
         fi
     done < "$TX/manifest"
     (( ! conflict )) || die '请先处理配置冲突'
     if [[ -f $TX/nft.after ]]; then
-        nft list table inet vps_init > "$TX/nft.current" || die '防火墙状态与事务不一致'
-        cmp -s "$TX/nft.current" "$TX/nft.after" || die '防火墙在事务后变化，拒绝覆盖'
+        if nft list table inet vps_init > "$TX/nft.current" 2>/dev/null; then
+            if ! cmp -s "$TX/nft.current" "$TX/nft.after" && ! cmp -s "$TX/nft.current" "$TX/nft.before"; then die '防火墙在事务后变化，拒绝覆盖'; fi
+        elif [[ -f $TX/nft.before ]]; then die '原有防火墙表已被外部删除，拒绝覆盖'; fi
     fi
     if [[ -f $TX/zram.created ]]; then
         /usr/local/sbin/vps-init-zram stop
@@ -271,11 +276,21 @@ rollback() {
         rm -f -- "$swapfile"
     fi
     while IFS= read -r target; do
-        if [[ -e $TX/files$target ]]; then cp -p -- "$TX/files$target" "$target"; else rm -f -- "$target"; fi
+        if [[ -e $TX/files$target ]]; then
+            tmp=$(mktemp "$(dirname "$target")/.vps-init-restore.XXXXXX")
+            cp -p -- "$TX/files$target" "$tmp"
+            mv -f -- "$tmp" "$target"
+            if has restorecon; then restorecon "$target"; fi
+        else rm -f -- "$target"; fi
     done < "$TX/manifest"
-    while IFS=$'\t' read -r key value; do [[ -z $key ]] || sysctl -q -w "$key=$value"; done < "$TX/sysctl.before"
-    while IFS=$'\t' read -r key value; do [[ -z $key ]] || printf '%s\n' "$value" > "$key"; done < "$TX/sysfs.before"
+    # 优先恢复访问入口；后续非访问参数失败不应阻挡 SSH 恢复。
     rollback_access
+    while IFS=$'\t' read -r key value; do
+        [[ -n $key ]] || continue
+        if [[ -f $TX/sysctl.failed ]] && grep -Fxq "$key" "$TX/sysctl.failed"; then continue; fi
+        sysctl -q -w "$key=$value"
+    done < "$TX/sysctl.before"
+    while IFS=$'\t' read -r key value; do [[ -z $key ]] || printf '%s\n' "$value" > "$key"; done < "$TX/sysfs.before"
     if [[ $INIT == systemd ]]; then
         systemctl daemon-reload
         [[ ! -f $TX/logs.changed ]] || systemctl restart systemd-journald

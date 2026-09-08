@@ -1,113 +1,141 @@
 # VPS Init
 
-中文 Linux VPS 初始化工具，提供一键优化、只读预览、事务备份及恢复。
+中文 Linux VPS 初始化工具：**一键优化、自动 SSH 端口、配置备份与回滚**。核心逻辑自行实现，不下载执行第三方脚本。
 
-**当前为开发预览版，尚未完成真实 VPS、SSH 迁移、重启和跨发行版验收。请先在可恢复的测试机验证，不应直接用于唯一访问入口的生产服务器。**
+当前版本 **v0.1.0-beta.1**。已通过静态检查、10 种发行版容器基础检查，以及 Ubuntu 临时虚拟机的真实 SSH、UFW、swap 和 nftables 测试。它不是“所有 Linux 版本均已认证”的承诺；具体能力及未验证环境见下文。
 
-## 一键使用
+## 下载与一键优化
 
-下载仓库的完整源码包并解压。不要只下载入口脚本，它需要同目录下的 `lib/`。
+在 VPS 上下载完整发行包（入口依赖同目录的 `lib/`），先核对校验值：
 
 ```bash
-# 只读检查和预览
+curl -fLO https://github.com/ikun8887/vps-init/releases/download/v0.1.0-beta.1/vps-init-v0.1.0-beta.1.tar.gz
+curl -fLO https://github.com/ikun8887/vps-init/releases/download/v0.1.0-beta.1/SHA256SUMS
+sha256sum -c SHA256SUMS
+tar -xzf vps-init-v0.1.0-beta.1.tar.gz
+cd vps-init-v0.1.0-beta.1
+
 bash vps-init.sh check
 bash vps-init.sh plan
+sudo bash vps-init.sh optimize --install-tools
+```
 
-# 一键优化：显示计划后输入 yes
-sudo bash vps-init.sh optimize
+`optimize` 显示计划后输入 `yes` 即执行基础模块；默认在 20000–39999 中选择空闲 SSH 端口。已是 root 时可去掉 `sudo`。校验文件用于发现下载损坏，仍需信任仓库账号及所选版本。
 
-# 自动执行，指定 SSH 新端口，并放行网站端口
-sudo bash vps-init.sh optimize --yes --ssh-port 22222 --allow tcp:80,443
+需要无人值守执行配置时：
 
-# 自动执行但保持 SSH 端口，且不创建交换空间
+```bash
+sudo bash vps-init.sh optimize --yes --install-tools --ssh-port 22222 --allow tcp:80,443 --allow udp:443
+```
+
+**SSH 新连接确认不能由 `--yes` 跳过。** 请预先准备云控制台，并放行目标端口的云安全组/NAT。脚本只能修改 VPS 内部配置。自动随机端口会在输出中显示，未确认则在恢复期限到达后尝试回滚整个事务。
+
+保持现有 SSH 端口且不创建 swap：
+
+```bash
 sudo bash vps-init.sh optimize --yes --keep-ssh-port --no-swap
 ```
 
-`optimize` 是一键入口，默认覆盖全部基础模块。已有 swap、缺少内核权限、现存防火墙冲突等情形会输出跳过原因。**执行结束不代表所有模块都修改成功，也不代表性能必然提升。**
+`--keep-ssh-port` 仍会处理适用的防火墙，并可能要求访问确认；它不是“跳过访问模块”。
 
-## 当前功能
+## 功能与默认行为
 
-| 模块 | 当前实现 |
-| --- | --- |
-| 环境检测 | Linux、发行版、初始化系统、虚拟化、内存/cgroup 限额、磁盘、监听端口 |
-| 日志 | journald 持久/内存空间限制、保留期、压缩；logrotate 配置验证 |
-| 内存 | 无 swap 时按资源创建磁盘 swap；可选 zram；保护空间不足及已有 swap |
-| CPU | CPUFreq 支持时可选 performance，添加开机设置，避开已有调频管理服务 |
-| TCP/UDP | 分内存等级提高缓冲上限、保留 TCP 自动调节、显示丢包/重传计数 |
-| BBR | 检测并启用内核提供的 `bbr`，不替换内核，不猜测 BBR 版本 |
-| 内核安全 | 硬链接/符号链接保护、SYN cookies；保留 SELinux/AppArmor 状态 |
-| 磁盘 | 空间/inode 检查、受支持的系统 fstrim 定时器 |
-| SSH | systemd 普通服务及受支持的 socket 绑定下新旧端口过渡、独立恢复定时器、实际连接确认 |
-| 防火墙 | 适配活动 firewalld/UFW；无冲突时管理独立 nftables 表，保留现有监听服务 |
-| Docker | 可选配置新容器默认日志轮转；不自动重启 Docker |
-| 事务 | 配置备份、运行日志、重复写入保留原备份、回滚冲突检测 |
-| Fail2ban | 可选配置已有 Fail2ban，限制 SSH 登录失败次数 |
+| 模块 | 一键默认行为 | 可选项及边界 |
+| --- | --- | --- |
+| 检测 | 发行版、内核、架构、systemd/OpenRC、虚拟化、cgroup 内存上限、磁盘/inode、监听端口 | 未知发行版仅允许只读命令 |
+| CPU | 检查 CPU 数量与负载，保留原调频策略 | `--cpu-performance` 在真实可写 CPUFreq 接口上生效并持久化，避开已有调频服务；多数 VPS 无该接口 |
+| 内存 | 已有 swap 则保留；无 swap 时按 RAM 创建 512–2048 MiB 交换文件 | `--swap-mb 1024`、`--no-swap`、`--zram`；检查空间及文件系统，不叠加已有 swap/zswap |
+| 日志 | journald 持久日志 128/256 MiB、运行时 32/64 MiB、14 天；logrotate 默认每周、4 份、16 MiB 大小阈值 | 应用块内设置优先；大小阈值在轮转任务运行时检查，不是实时磁盘硬配额 |
+| 事务日志 | 每次运行保存约 1 MiB，终端继续输出 | 历史配置备份不自动清理，需自行管理空间 |
+| TCP/UDP | 按内存提高缓冲上限至 4/8/16 MiB，保留更大现值和 TCP 初始分配 | 不改 MTU、重传次数、UDP 超时、转发或 IPv6；应用仍需使用相应缓冲 |
+| BBR | 检测并启用内核提供的 `bbr` | 不更换内核、不承诺 BBR 版本，保留既有 qdisc；不直接控制 QUIC 拥塞算法 |
+| 磁盘 | 容量/inode 检查；系统支持时启用 fstrim.timer | 不删除业务数据、不更改挂载选项 |
+| 内核安全 | 硬链接/符号链接保护、SYN cookies | 保留 SELinux/AppArmor；不关闭安全模块 |
+| SSH | 自动选端口、新旧入口过渡、语法/有效配置/监听检查、独立恢复任务 | 支持普通服务及可识别的 socket 绑定；SELinux 端口迁移需要 semanage |
+| 防火墙 | 使用活动 UFW/firewalld；无冲突时创建独立 nftables 表 | nft 默认拒绝新入站，保留当前监听服务、ICMP/IPv6 邻居发现和 DHCP；不接管自定义规则或 Docker 网络 |
+| 管理员 | 默认保留现有认证 | 可导入自己的公钥、创建可信管理员、验证后关闭密码/root 登录 |
+| Fail2ban | 默认不改 | `--fail2ban` 配置已安装服务及实际 SSH 端口，systemd 后端 |
+| Docker 日志 | 默认不改 | `--docker-log-limit` 校验并补充新容器默认轮转；维护窗口重启 Docker 后新建容器生效 |
+| 基础维护 | 显示时间同步状态 | 可设置主机名、时区、执行发行版支持的安全更新 |
 
-BBR 的 sysctl 作用于 TCP，不会直接改变 QUIC 应用的拥塞控制；UDP 缓冲调整也要求应用正确使用 socket 缓冲设置。
+CPU/网络参数并不保证每个业务更快。BBR 作用于 TCP；UDP 缓冲优化不能突破带宽、路由、内核和应用限制。每个跳过项都会说明原因，不能把“命令结束”理解为所有模块均已修改。
 
-## 可选项
+## 公钥管理员与登录加固
+
+先将你自己的**公钥**上传到 VPS，例如 `/root/my-key.pub`，不要上传私钥：
 
 ```bash
-sudo bash vps-init.sh optimize --install-tools          # 使用现有发行版软件源
-sudo bash vps-init.sh optimize --swap-mb 1024           # 无 swap 时创建 1 GiB
-sudo bash vps-init.sh optimize --zram                   # 无 swap 且无 zswap 时使用 zram
-sudo bash vps-init.sh optimize --cpu-performance        # 需要真实可写 CPUFreq 接口
-sudo bash vps-init.sh optimize --docker-log-limit       # 需要 python3 和 dockerd
-sudo bash vps-init.sh optimize --security-updates       # 受支持的系统安全更新流程
-sudo bash vps-init.sh optimize --fail2ban               # 需要预先安装 Fail2ban
+sudo bash vps-init.sh optimize --install-tools --ssh-port 22222 \
+  --admin-user vpsadmin --public-key /root/my-key.pub \
+  --disable-password-login --disable-root-login
+```
+
+指定账号不存在时会创建；现有同名账号也会被授予 **完整免密码 sudo**，因此必须是你信任的管理员账号。公钥保存在 root 管理的 `/etc/ssh/vps-init-authorized-keys/`。
+
+使用刚提供公钥对应的私钥，以新管理员从新端口登录：
+
+```bash
+ssh -i ~/.ssh/id_ed25519 -p 22222 vpsadmin@你的服务器IP
+sudo --preserve-env=SSH_CONNECTION,SSH_USER_AUTH bash /实际解压路径/vps-init.sh confirm-ssh 实际事务ID
+```
+
+关闭密码/root 登录前，工具拒绝原主配置及其 Include 中的既有 `Match` 条件，以及无法安全解析的复杂 Include 路径。此类配置需要人工整合，不能仅凭当前会话抽样验证就宣称全局禁用成功。普通端口迁移不受这项额外限制。
+
+## 确认与恢复
+
+从新端口重新登录后，在 5 分钟恢复期限内执行终端给出的命令。未启用公钥管理员功能时：
+
+```bash
+sudo --preserve-env=SSH_CONNECTION bash /实际解压路径/vps-init.sh confirm-ssh 实际事务ID
+sudo bash /实际解压路径/vps-init.sh verify
+```
+
+确认后停止旧 SSH 监听。为避免误删既有规则，UFW/firewalld 旧放行规则及 nftables 保留的既有服务规则可能留下；这不代表旧端口仍有 SSH 服务。
+
+```bash
+sudo bash /实际解压路径/vps-init.sh rollback 实际事务ID
+```
+
+状态与备份位于 `/var/lib/vps-init/<事务ID>/`，仅 root 可读。恢复代码复制在事务内；systemd 使用独立 timer/service，OpenRC 使用已运行并启用的 atd。缺少可靠恢复机制就跳过访问迁移。
+
+回滚会先检查配置是否被人工修改，冲突时拒绝覆盖。swapoff 内存不足、系统损坏、服务失败也可能阻止完整回滚，需保留现有会话或使用控制台。软件包升级、已轮转日志及外部云配置不能撤销；新建管理员账号/家目录保留，但撤回本事务管理的公钥和 sudo 配置。不要删除等待确认的事务目录。多个事务应按从新到旧的顺序回滚。
+
+重复运行会保留已有 swap 和已确认 SSH 端口；已有访问事务待确认时拒绝启动下一次优化。`plan` 是模块级预览，尚不提供逐文件差异；`verify` 检查已管理 sysctl 和 SSH 状态，不替代公网连通及重启测试。
+
+## 可选命令
+
+```bash
+sudo bash vps-init.sh optimize --swap-mb 1024
+sudo bash vps-init.sh optimize --zram
+sudo bash vps-init.sh optimize --cpu-performance
+sudo bash vps-init.sh optimize --docker-log-limit
+sudo bash vps-init.sh optimize --fail2ban
+sudo bash vps-init.sh optimize --security-updates
 sudo bash vps-init.sh optimize --hostname my-vps --timezone Asia/Tokyo
 bash vps-init.sh help
 ```
 
-依赖 Bash 4+、GNU/coreutils 风格的基础工具、util-linux（含 flock）、procps 和 iproute2。Alpine 最小镜像需要提前准备 Bash 和这些工具。`--install-tools` 不修改软件源、不关闭签名校验；它也不能引导缺失的 Bash/flock。
+`--install-tools` 通过已配置的发行版软件源安装管理工具，不改源、不关闭签名验证。它不能引导缺失的 Bash/flock，也不会安装可选的 sudo、Fail2ban、Python、Docker、atd 或 semanage。最小系统应先使用发行版包管理器准备 Bash 4+、coreutils、util-linux、procps、iproute2 和 diffutils；Alpine 尤其需要额外安装 Bash/coreutils。
 
-## SSH 迁移与恢复
+安全更新：RHEL 系使用 `dnf upgrade --security`，SUSE 使用安全 patch；Debian/Ubuntu 需要预先配置 unattended-upgrades。主机名/时区变更需要 systemd 对应工具。脚本不会自动重启机器。
 
-1. 先确认云厂商控制台可用，并放行目标端口的云安全组/NAT 映射。使用自动随机端口时，在脚本显示端口后操作。
-2. 脚本保留新旧监听端口，并设置 5 分钟恢复期限。
-3. 从新端口重新登录，执行输出的确认命令，例如：
+## 兼容与验证
 
-```bash
-sudo --preserve-env=SSH_CONNECTION bash vps-init.sh confirm-ssh 20260909T000000Z-1234
-```
+| 环境 | 已验证内容 |
+| --- | --- |
+| Debian 12/13、Ubuntu 22.04/24.04/26.04 | 容器中的基础命令、参数和事务文件测试、只读检测 |
+| AlmaLinux 8/9/10、Alpine 3.24、openSUSE Leap 16 | 同上；容器共享宿主内核，不证明内核/服务兼容 |
+| Ubuntu 22.04/24.04 临时 VM | 一键执行，实际 SSH 新连接确认、旧端口关闭、UFW、手动及超时恢复 |
+| Ubuntu 24.04 socket 模式 | 实际端口迁移和恢复，保留原会话 |
+| Ubuntu 24.04 公钥管理员 | 公钥登录、sudo 确认、root 禁用、恢复旧登录 |
+| Ubuntu 24.04 swap/nftables | 真实交换文件、幂等与回滚；隔离网络命名空间内真实 nft 内核规则 |
 
-上面是事务 ID 示例，请使用实际输出。`SSH_CONNECTION` 会用于检查新会话的服务端口；root 本来就能伪造环境，因此这不是对 root 的安全认证边界。
+Rocky/RHEL/Fedora/SLES 有适配分支，但未分别完成实机验收。ARM、OpenRC 访问迁移、CPUFreq、zram、firewalld、SELinux 迁移、Docker/Fail2ban 及整机重启仍需相应环境验证。测试版不承诺 EOL 系统可安全维护。LXC/OpenVZ/容器会跳过宿主交换空间、内核调优及访问控制；未知系统只读退出。
 
-确认后 SSH 关闭旧监听；UFW/firewalld 的既有放行规则可能仍保留，不代表旧端口仍有 SSH 服务。nftables 保留的既有业务规则也不会被当作 SSH 专属规则删除。
-
-未确认则恢复整个配置事务。修改配置后发现人工变更，回滚会拒绝覆盖，需要通过保留会话或控制台处理。恢复定时器也不能对机器宕机、磁盘损坏和云安全组误改提供保证。
-
-```bash
-sudo bash vps-init.sh verify
-sudo bash vps-init.sh rollback <实际事务ID>
-```
-
-备份和运行日志在 `/var/lib/vps-init/<事务ID>/`，仅 root 可读。请管理历史备份空间；当前不自动清除备份。软件包升级和已轮转日志无法回滚。不要删除尚在等待 SSH 确认的事务目录。
-
-## 兼容和待完成事项
-
-已编写 Debian/Ubuntu、Rocky/AlmaLinux/RHEL/Fedora、Alpine、openSUSE/SLES 的工具安装适配。**适配代码存在不代表该系统已经通过测试。**
-
-- 当前未通过真实虚拟机运行及重启验证，正式支持矩阵尚未建立。
-- OpenRC 的安全访问迁移当前明确跳过；socket activation 已编写双栈地址解析，但尚待真实服务验证。
-- 密钥导入、管理员账号创建、禁止密码/root 登录尚未实现。
-- 应用日志轮转审计、备份保留策略、细化网络场景和性能基准尚待补齐。
-- 当前 `plan` 为模块级预览，逐文件/逐参数差异预览尚待补齐。
-- 容器默认跳过交换空间、内核调优及访问控制；宿主机限制不能通过脚本绕过。
-- 不承诺对 EOL 系统提供安全维护；当前版本检测尚未实现维护期策略。
-
-## 测试
-
-```bash
-find . -name '*.sh' -print0 | xargs -0 -n1 bash -n
-shellcheck -x vps-init.sh tests/*.sh
-bash tests/test-core.sh
-```
-
-测试不需要 root，只在临时目录操作。静态检查和临时文件测试不能替代 SSH、防火墙、swap、内核与重启集成测试。
+测试和证据见 [验证记录](docs/VALIDATION.md)、[GitHub Actions](https://github.com/ikun8887/vps-init/actions)。
 
 ## 安全与来源
 
-核心代码自行实现，无运行时远程脚本执行、预置公钥/密码、遥测或隐藏下载。不能以此保证“绝对无漏洞或后门”；需要对每个发布版本审计并记录验证证据。
+代码不含预置密码/私钥/公钥、遥测、混淆或远程脚本执行。包管理器仍依赖你配置的软件源。发布前进行了源码审查并修复条件 SSH 认证覆盖问题；这些工作不能构成“绝对无漏洞/无后门”保证。
 
-技术依据、参考帖状态见 [资料来源](docs/SOURCES.md)。
+参考 NodeSeek 及 Linux、OpenSSH、systemd、发行版等官方资料，采用范围与链接见 [资料来源](docs/SOURCES.md)。核心脚本未引用帖子中的第三方一键执行代码。使用 MIT 许可证。

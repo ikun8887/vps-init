@@ -57,6 +57,10 @@ write_file "$new" <<< new
 rollback
 [[ $(cat "$target") == original && ! -e $new ]]
 ok '恢复原文件并删除事务新建配置'
+rm "$TX/rolled-back"
+rollback
+[[ $(cat "$target") == original && ! -e $new ]]
+ok '文件已恢复但事务未标记完成时可安全重试'
 
 if (load_transaction '../../etc') >/dev/null 2>&1; then exit 1; fi
 ok '事务路径遍历拒绝'
@@ -79,4 +83,20 @@ systemctl() { printf '%s\n' '/run/ssh.socket (Stream)'; }
 if prepare_socket ssh.socket 22222; then exit 1; fi
 unset -f systemctl
 ok 'socket 双栈绑定保留、旧端口残留和 Unix socket 拒绝'
+
+policy="$WORK/sshd-policy"
+printf 'PasswordAuthentication yes\n' > "$policy"
+assert_simple_auth_policy "$policy"
+printf 'Match User legacy\n PasswordAuthentication yes\n' >> "$policy"
+if (assert_simple_auth_policy "$policy") >/dev/null 2>&1; then exit 1; fi
+printf 'Include %s/child-policy\n' "$WORK" > "$policy"
+printf 'mAtCh=Address 192.0.2.0/24\n PermitRootLogin yes\n' > "$WORK/child-policy"
+if (assert_simple_auth_policy "$policy") >/dev/null 2>&1; then exit 1; fi
+printf 'PasswordAuthentication yes\n' > "$WORK/child-policy"
+assert_simple_auth_policy "$policy"
+printf '\"Match\" User legacy\n' > "$WORK/child-policy"
+if (assert_simple_auth_policy "$policy") >/dev/null 2>&1; then exit 1; fi
+printf 'Include %s/sshd-policy\n' "$WORK" > "$WORK/child-policy"
+if (assert_simple_auth_policy "$policy") >/dev/null 2>&1; then exit 1; fi
+ok '全局加固拒绝 Match、递归 Include 覆盖和循环'
 printf '%s checks passed\n' "$passed"
