@@ -32,6 +32,7 @@ VPS Init 0.1.0
   --cpu-performance      有 CPUFreq 接口时选择 performance
   --zram                 使用 zram 替代自动磁盘 swap（需要内核支持）
   --docker-log-limit      配置 Docker 新容器默认日志轮转（不重启 Docker）
+  --fail2ban              为已安装的 Fail2ban 配置 SSH 登录失败封禁
   --hostname 名称         设置主机名（需 hostnamectl）
   --timezone 时区         设置时区（需 timedatectl）
 EOF
@@ -47,7 +48,8 @@ main() {
     parse_options "$@"
     detect
     case "$command" in
-        check|plan|verify) report; [[ $command != plan ]] || show_plan;;
+        check|plan) report; [[ $command != plan ]] || show_plan;;
+        verify) report; verify_managed;;
         optimize)
             require_root
             show_plan
@@ -69,6 +71,7 @@ main() {
             configure_storage
             configure_docker
             configure_access
+            configure_fail2ban
             report
             say "完成配置事务：$TXID；备份：$TX"
             say "恢复命令：sudo bash $BASE/vps-init.sh rollback $TXID"

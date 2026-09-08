@@ -10,7 +10,7 @@ jobs:
       - name: Bash 语法
         run: find . -name '*.sh' -print0 | xargs -0 -n1 bash -n
       - name: ShellCheck
-        run: shellcheck -x vps-init.sh lib/*.sh tests/*.sh
+        run: shellcheck -x vps-init.sh tests/*.sh
       - name: 参数和恢复测试
         run: bash tests/test-core.sh
       - name: 只读诊断

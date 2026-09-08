@@ -32,15 +32,16 @@ sudo bash vps-init.sh optimize --yes --keep-ssh-port --no-swap
 | 环境检测 | Linux、发行版、初始化系统、虚拟化、内存/cgroup 限额、磁盘、监听端口 |
 | 日志 | journald 持久/内存空间限制、保留期、压缩；logrotate 配置验证 |
 | 内存 | 无 swap 时按资源创建磁盘 swap；可选 zram；保护空间不足及已有 swap |
-| CPU | CPUFreq 支持时可选 performance；当前只在本次启动生效 |
+| CPU | CPUFreq 支持时可选 performance，添加开机设置，避开已有调频管理服务 |
 | TCP/UDP | 分内存等级提高缓冲上限、保留 TCP 自动调节、显示丢包/重传计数 |
 | BBR | 检测并启用内核提供的 `bbr`，不替换内核，不猜测 BBR 版本 |
 | 内核安全 | 硬链接/符号链接保护、SYN cookies；保留 SELinux/AppArmor 状态 |
 | 磁盘 | 空间/inode 检查、受支持的系统 fstrim 定时器 |
-| SSH | systemd 普通服务模式下新旧端口过渡、独立恢复定时器、实际连接确认 |
+| SSH | systemd 普通服务及受支持的 socket 绑定下新旧端口过渡、独立恢复定时器、实际连接确认 |
 | 防火墙 | 适配活动 firewalld/UFW；无冲突时管理独立 nftables 表，保留现有监听服务 |
 | Docker | 可选配置新容器默认日志轮转；不自动重启 Docker |
 | 事务 | 配置备份、运行日志、重复写入保留原备份、回滚冲突检测 |
+| Fail2ban | 可选配置已有 Fail2ban，限制 SSH 登录失败次数 |
 
 BBR 的 sysctl 作用于 TCP，不会直接改变 QUIC 应用的拥塞控制；UDP 缓冲调整也要求应用正确使用 socket 缓冲设置。
 
@@ -53,6 +54,7 @@ sudo bash vps-init.sh optimize --zram                   # 无 swap 且无 zswap 
 sudo bash vps-init.sh optimize --cpu-performance        # 需要真实可写 CPUFreq 接口
 sudo bash vps-init.sh optimize --docker-log-limit       # 需要 python3 和 dockerd
 sudo bash vps-init.sh optimize --security-updates       # 受支持的系统安全更新流程
+sudo bash vps-init.sh optimize --fail2ban               # 需要预先安装 Fail2ban
 sudo bash vps-init.sh optimize --hostname my-vps --timezone Asia/Tokyo
 bash vps-init.sh help
 ```
@@ -87,9 +89,9 @@ sudo bash vps-init.sh rollback <实际事务ID>
 已编写 Debian/Ubuntu、Rocky/AlmaLinux/RHEL/Fedora、Alpine、openSUSE/SLES 的工具安装适配。**适配代码存在不代表该系统已经通过测试。**
 
 - 当前未通过真实虚拟机运行及重启验证，正式支持矩阵尚未建立。
-- SSH socket activation 和 OpenRC 的安全访问迁移当前明确跳过，后续需要实现和验证。
-- 密钥导入、管理员账号创建、禁止密码/root 登录、Fail2ban 尚未实现。
-- 应用日志轮转审计、备份保留策略、CPU 持久化、细化网络场景和性能基准尚待补齐。
+- OpenRC 的安全访问迁移当前明确跳过；socket activation 已编写双栈地址解析，但尚待真实服务验证。
+- 密钥导入、管理员账号创建、禁止密码/root 登录尚未实现。
+- 应用日志轮转审计、备份保留策略、细化网络场景和性能基准尚待补齐。
 - 当前 `plan` 为模块级预览，逐文件/逐参数差异预览尚待补齐。
 - 容器默认跳过交换空间、内核调优及访问控制；宿主机限制不能通过脚本绕过。
 - 不承诺对 EOL 系统提供安全维护；当前版本检测尚未实现维护期策略。
@@ -98,7 +100,7 @@ sudo bash vps-init.sh rollback <实际事务ID>
 
 ```bash
 find . -name '*.sh' -print0 | xargs -0 -n1 bash -n
-shellcheck -x vps-init.sh lib/*.sh tests/*.sh
+shellcheck -x vps-init.sh tests/*.sh
 bash tests/test-core.sh
 ```
 

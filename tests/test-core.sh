@@ -64,4 +64,19 @@ ok '事务路径遍历拒绝'
 parse_options --yes --ssh-port 22222 --allow tcp:80,443 --swap-mb 512
 [[ $YES == 1 && $SSH_PORT == 22222 && $SWAP_MB == 512 && ${ALLOW[0]} == tcp:80,443 ]]
 ok '一键命令参数解析'
+
+# 使用真实地址格式检查生成逻辑，不启动本机服务。
+systemctl() { printf '%s\n' '0.0.0.0:22 (Stream) [::]:22 (Stream)'; }
+prepare_socket ssh.socket 22222
+grep -Fxq 'ListenStream=0.0.0.0:22' "$TX/socket.transition"
+grep -Fxq 'ListenStream=[::]:22' "$TX/socket.transition"
+grep -Fxq 'ListenStream=0.0.0.0:22222' "$TX/socket.confirm"
+grep -Fxq 'ListenStream=[::]:22222' "$TX/socket.confirm"
+if socket_port_only ssh.socket 22222; then exit 1; fi
+systemctl() { printf '%s\n' '0.0.0.0:22222 (Stream) [::]:22222 (Stream)'; }
+socket_port_only ssh.socket 22222
+systemctl() { printf '%s\n' '/run/ssh.socket (Stream)'; }
+if prepare_socket ssh.socket 22222; then exit 1; fi
+unset -f systemctl
+ok 'socket 双栈绑定保留、旧端口残留和 Unix socket 拒绝'
 printf '%s checks passed\n' "$passed"

@@ -66,14 +66,17 @@ stop_recovery() {
 configure_access() {
     (( ! LIMITED )) || { skip '受限容器不接管 SSH 或防火墙'; return; }
     [[ $INIT == systemd ]] || { skip 'OpenRC 访问控制暂未具备经过验证的独立恢复机制，保留 SSH/防火墙'; return; }
-    has sshd && has ss || { skip '缺少 sshd 或 ss'; return; }
+    if ! has sshd || ! has ss; then skip '缺少 sshd 或 ss'; return; fi
     [[ -f /etc/ssh/sshd_config ]] || { skip '未找到 OpenSSH 配置'; return; }
     sshd -t
     local service=sshd
     if systemctl is-active --quiet ssh.service; then service=ssh
     elif ! systemctl is-active --quiet sshd.service; then skip 'SSH 服务未运行，不启动新的远程访问服务'; return; fi
-    if systemctl is-active --quiet ssh.socket || systemctl is-active --quiet sshd.socket; then
-        skip '检测到 SSH socket activation；当前版本保留端口，避免覆盖地址绑定'; return
+    local socket=''
+    if systemctl is-active --quiet ssh.socket; then socket=ssh.socket
+    elif systemctl is-active --quiet sshd.socket; then socket=sshd.socket; fi
+    if [[ -n $socket && $(systemctl show "$service.service" -p KillMode --value) != process ]]; then
+        skip 'socket 模式下服务 KillMode 非 process，无法保证保留现有 SSH 会话'; return
     fi
     firewall_detect
     [[ $FW != unknown && $FW != none ]] || { skip '已有自定义防火墙或无支持的工具，不接管 SSH/防火墙'; return; }
@@ -121,6 +124,10 @@ configure_access() {
     printf '%s\n' "$service" > "$TX/ssh.service"
     printf '%s\n' "$target" > "$TX/ssh.target"
     printf '%s\n' "${old_ports[@]}" > "$TX/ssh.oldports"
+    if [[ -n $socket ]]; then
+        prepare_socket "$socket" "$target" || { skip 'socket 绑定含不支持的地址形式，保留 SSH'; return; }
+        printf '%s\n' "$socket" > "$TX/ssh.socket"
+    fi
     if [[ $FW == ufw ]]; then
         for p in /etc/ufw/user.rules /etc/ufw/user6.rules; do backup "$p"; done
     elif [[ $FW == nft ]]; then
@@ -148,11 +155,45 @@ configure_access() {
     } > "$TX/sshd.new"
     sshd -t -f "$TX/sshd.new"
     write_file /etc/ssh/sshd_config < "$TX/sshd.new"
-    service_reload "$service"
+    if [[ -n $socket ]]; then
+        write_file "/etc/systemd/system/$socket.d/90-vps-init.conf" < "$TX/socket.transition"
+        systemctl daemon-reload
+        systemctl stop "$service.service"
+        systemctl restart "$socket"
+        systemctl start "$service.service"
+    else service_reload "$service"; fi
     [[ -n $(ss -H -ltn "sport = :$target") ]] || die '新端口未监听，将由恢复任务还原'
     say "[待确认] 请在 5 分钟内从新端口 $target 重新 SSH 登录，然后执行："
     say "sudo bash $BASE/vps-init.sh confirm-ssh $TXID"
     say '云安全组/NAT 未放行时保留当前会话；超时恢复整个配置事务。'
+}
+prepare_socket() {
+    local socket=$1 target=$2 address kind listen
+    local -a fields
+    listen=$(systemctl show "$socket" -p Listen --value)
+    IFS=' ' read -r -a fields <<< "$listen"
+    (( ${#fields[@]} > 0 && ${#fields[@]} % 2 == 0 )) || return 1
+    printf '[Socket]\nListenStream=\n' > "$TX/socket.transition"
+    printf '[Socket]\nListenStream=\n' > "$TX/socket.confirm"
+    local i new
+    for ((i=0; i<${#fields[@]}; i+=2)); do
+        address=${fields[i]}; kind=${fields[i+1]}
+        [[ $kind == '(Stream)' ]] || return 1
+        [[ $address =~ ^(\[[0-9a-fA-F:.%_-]+\]|[0-9.]+):[0-9]+$ ]] || return 1
+        new="${address%:*}:$target"
+        printf 'ListenStream=%s\n' "$address" >> "$TX/socket.transition"
+        if [[ $address != "$new" ]]; then printf 'ListenStream=%s\n' "$new" >> "$TX/socket.transition"; fi
+        printf 'ListenStream=%s\n' "$new" >> "$TX/socket.confirm"
+    done
+}
+socket_port_only() {
+    local socket=$1 target=$2 binding
+    local -a bindings
+    IFS=' ' read -r -a bindings <<< "$(systemctl show "$socket" -p Listen --value)"
+    (( ${#bindings[@]} )) || return 1
+    for binding in "${bindings[@]}"; do
+        [[ $binding == '(Stream)' || ${binding##*:} == "$target" ]] || return 1
+    done
 }
 build_nft() {
     local -a ports=("$@")
@@ -199,7 +240,16 @@ confirm_ssh() {
     local p
     while read -r p; do [[ $p == "$target" ]] || die "Include 中仍有端口 $p，请人工整理后再迁移"; done < <(sshd -T -f "$TX/sshd.confirm" | awk '$1=="port" {print $2}')
     write_file /etc/ssh/sshd_config < "$TX/sshd.confirm"
-    service_reload "$service"
+    if [[ -f $TX/ssh.socket ]]; then
+        local socket
+        socket=$(cat "$TX/ssh.socket")
+        write_file "/etc/systemd/system/$socket.d/90-vps-init.conf" < "$TX/socket.confirm"
+        systemctl daemon-reload
+        systemctl stop "$service.service"
+        systemctl restart "$socket"
+        systemctl start "$service.service"
+        socket_port_only "$socket" "$target" || die 'socket 实际绑定仍含旧端口，保留恢复任务'
+    else service_reload "$service"; fi
     [[ -n $(ss -H -ltn "sport = :$target") ]] || die '新端口监听异常'
     FW=$(cat "$TX/firewall.kind")
     if [[ $FW == nft ]]; then
@@ -260,7 +310,12 @@ rollback_access() {
     if [[ -f $TX/ssh.service ]]; then
         service=$(cat "$TX/ssh.service")
         sshd -t
-        service_reload "$service"
+        if [[ -f $TX/ssh.socket ]]; then
+            systemctl daemon-reload
+            systemctl stop "$service.service"
+            systemctl restart "$(cat "$TX/ssh.socket")"
+            systemctl start "$service.service"
+        else service_reload "$service"; fi
     fi
     if [[ -f $TX/selinux.added ]]; then semanage port -d -t ssh_port_t -p tcp "$(cat "$TX/selinux.added")"; fi
     if [[ -f $TX/access.pending || -f $TX/access.confirmed ]]; then stop_recovery; fi

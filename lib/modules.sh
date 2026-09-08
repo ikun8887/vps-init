@@ -52,9 +52,23 @@ EOF
         systemctl restart systemd-journald
     else skip '非 systemd：journald 配置不适用'; fi
     if has logrotate; then
+        if [[ -f /etc/logrotate.conf ]]; then
+            # 在 include 之前补充默认上限，应用自己的块内设置仍有优先权。
+            awk '
+                /^# BEGIN VPS-INIT DEFAULTS$/ {managed=1;next}
+                /^# END VPS-INIT DEFAULTS$/ {managed=0;next}
+                managed {next}
+                !added && /^[[:space:]]*include[[:space:]]/ {
+                    print "# BEGIN VPS-INIT DEFAULTS\nweekly\nrotate 4\nmaxsize 16M\ncompress\n# END VPS-INIT DEFAULTS"
+                    added=1
+                }
+                {print}
+            ' /etc/logrotate.conf > "$TX/logrotate.new"
+            write_file /etc/logrotate.conf < "$TX/logrotate.new"
+        fi
         # 不添加覆盖所有日志的通配符规则，避免与发行版规则重复。
         write_file /etc/logrotate.d/vps-init <<'EOF'
-/var/log/vps-init.log {
+/var/lib/vps-init/*/run.log {
     weekly
     maxsize 1M
     rotate 4
@@ -94,7 +108,7 @@ configure_memory() {
     say "已创建 ${size} MiB swap；保留内核 swappiness 默认策略。"
 }
 configure_zram() {
-    has modprobe && has zramctl || { skip 'zram 需要 modprobe 与 zramctl'; return; }
+    if ! has modprobe || ! has zramctl; then skip 'zram 需要 modprobe 与 zramctl'; return; fi
     [[ ! -e /sys/block/zram0 ]] || { skip '已存在 zram 设备，避免接管其他管理器'; return; }
     if [[ -r /sys/module/zswap/parameters/enabled ]] && [[ $(cat /sys/module/zswap/parameters/enabled) == Y ]]; then
         skip 'zswap 已启用，避免叠加压缩'; return
@@ -115,12 +129,13 @@ start)
     swapon -p 100 /dev/zram0
     ;;
 stop)
-    swapoff /dev/zram0
-    zramctl --reset /dev/zram0
+    if grep -q '^/dev/zram0[[:space:]]' /proc/swaps; then swapoff /dev/zram0; fi
+    if [ -e /sys/block/zram0 ]; then zramctl --reset /dev/zram0; fi
     ;;
 esac
 EOF
     chmod 700 /usr/local/sbin/vps-init-zram
+    touch "$TX/zram.created"
     if [[ $INIT == systemd ]]; then
         write_file /etc/systemd/system/vps-init-zram.service <<'EOF'
 [Unit]
@@ -147,11 +162,15 @@ EOF
         rc-update add vps-init-zram default
         rc-service vps-init-zram start
     fi
-    touch "$TX/zram.created"
 }
 configure_cpu() {
     (( CPU_PERFORMANCE )) || { skip 'CPU 保留调度策略；可显式使用 --cpu-performance'; return; }
     (( ! LIMITED )) || { skip '容器无 CPU 调频管理权限'; return; }
+    if [[ $INIT == systemd ]]; then
+        if systemctl is-active --quiet tuned || systemctl is-active --quiet power-profiles-daemon; then
+            skip '已有调频管理服务，避免竞争'; return
+        fi
+    fi
     local p count=0
     for p in /sys/devices/system/cpu/cpufreq/policy*/scaling_governor; do
         [[ -f $p && -w $p ]] || continue
@@ -160,7 +179,41 @@ configure_cpu() {
         printf 'performance\n' > "$p"
         count=$((count+1))
     done
-    if (( ! count )); then skip 'VPS 未提供可写的 CPUFreq 接口'; else say 'CPU performance 已应用于本次启动；不覆盖系统调频服务'; fi
+    if (( ! count )); then skip 'VPS 未提供可写的 CPUFreq 接口'; return; fi
+    if [[ ! -f /usr/local/sbin/vps-init-cpu ]]; then touch "$TX/cpu.created"; fi
+    write_file /usr/local/sbin/vps-init-cpu <<'EOF'
+#!/bin/sh
+set -eu
+for path in /sys/devices/system/cpu/cpufreq/policy*/scaling_governor; do
+    [ -w "$path" ] || continue
+    grep -qw performance "${path%/*}/scaling_available_governors" || continue
+    printf 'performance\n' > "$path"
+done
+EOF
+    chmod 700 /usr/local/sbin/vps-init-cpu
+    if [[ $INIT == systemd ]]; then
+        write_file /etc/systemd/system/vps-init-cpu.service <<'EOF'
+[Unit]
+Description=VPS Init CPU governor
+After=systemd-modules-load.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/vps-init-cpu
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+        systemctl enable vps-init-cpu.service
+    else
+        write_file /etc/init.d/vps-init-cpu <<'EOF'
+#!/sbin/openrc-run
+description="VPS Init CPU governor"
+start() { /usr/local/sbin/vps-init-cpu; }
+EOF
+        chmod 755 /etc/init.d/vps-init-cpu
+        rc-update add vps-init-cpu default
+    fi
+    say 'CPU performance 已应用，并添加开机配置。'
 }
 configure_network() {
     (( ! LIMITED )) || { skip '容器不修改宿主机网络参数'; return; }
@@ -209,13 +262,16 @@ configure_security() {
     # 不强制 rp_filter、禁转发或关闭 IPv6，以兼容 VPN/多网卡。
     write_file /etc/sysctl.d/60-vps-init-security.conf < "$SYSCTL_TEMP"
     if has getenforce; then say "SELinux：$(getenforce)，保留现状"; fi
-    if has aa-status; then aa-status --enabled && say 'AppArmor 已启用' || say 'AppArmor 未启用'; fi
+    if has aa-status; then
+        if aa-status --enabled; then say 'AppArmor 已启用'; else say 'AppArmor 未启用'; fi
+    fi
     say '保留现有 SSH 认证方式；仅改端口不等于密钥认证加固。'
 }
 configure_storage() {
     if [[ $INIT == systemd ]] && has fstrim && has lsblk && lsblk -D -n -o DISC-MAX | grep -qvE '^ *0B? *$'; then
         if systemctl cat fstrim.timer >/dev/null 2>&1; then
             systemctl is-enabled fstrim.timer > "$TX/fstrim.before" 2>/dev/null || true
+            systemctl is-active fstrim.timer > "$TX/fstrim.active" 2>/dev/null || true
             systemctl enable --now fstrim.timer
         else skip '系统未提供 fstrim.timer'; fi
     else skip '未检测到可用 TRIM 调度；不修改文件系统挂载选项'; fi
@@ -224,7 +280,7 @@ configure_storage() {
 }
 configure_docker() {
     (( DOCKER_LOG )) || return 0
-    has docker && has python3 || { skip 'Docker 日志配置需要 docker 和 python3'; return; }
+    if ! has docker || ! has python3; then skip 'Docker 日志配置需要 docker 和 python3'; return; fi
     backup /etc/docker/daemon.json
     python3 - "$TX/docker.new" <<'PY'
 import json, os, sys
@@ -249,4 +305,29 @@ PY
     dockerd --validate --config-file "$TX/docker.new"
     write_file /etc/docker/daemon.json < "$TX/docker.new"
     say '[待生效] Docker 配置已校验；维护窗口重启 Docker 后，新建容器采用默认日志限制。'
+}
+
+configure_fail2ban() {
+    (( FAIL2BAN )) || return 0
+    if ! has fail2ban-client || ! has sshd; then skip 'Fail2ban 未安装，请先通过系统软件源安装'; return; fi
+    [[ $INIT == systemd ]] || { skip 'Fail2ban 当前只配置 systemd 后端'; return; }
+    local ports remote=''
+    ports=$(sshd -T | awk '$1=="port" {printf "%s%s",sep,$2;sep=","}')
+    [[ -n $ports ]] || die 'Fail2ban 无法读取 SSH 端口'
+    remote=${SSH_CONNECTION:-}; remote=${remote%% *}
+    [[ $remote =~ ^[0-9a-fA-F:.]+$ ]] || remote=''
+    systemctl is-active fail2ban > "$TX/fail2ban.active" || true
+    write_file /etc/fail2ban/jail.d/60-vps-init.local <<EOF
+[sshd]
+enabled = true
+backend = systemd
+port = $ports
+maxretry = 5
+findtime = 10m
+bantime = 1h
+ignoreip = 127.0.0.1/8 ::1 $remote
+EOF
+    fail2ban-client -t
+    systemctl restart fail2ban
+    fail2ban-client status sshd
 }

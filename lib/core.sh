@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 YES=0 KEEP_SSH=0 SSH_PORT=auto SWAP_MB=auto NO_SWAP=0 INSTALL=0 UPDATES=0
 CPU_PERFORMANCE=0 ZRAM=0 DOCKER_LOG=0 HOSTNAME_NEW='' TIMEZONE_NEW=''
+FAIL2BAN=0
 STATE=/var/lib/vps-init
 declare -a ALLOW=()
 say() { printf '%s\n' "$*"; }
@@ -20,11 +21,17 @@ parse_options() {
             --cpu-performance) CPU_PERFORMANCE=1;;
             --zram) ZRAM=1;;
             --docker-log-limit) DOCKER_LOG=1;;
+            --fail2ban) FAIL2BAN=1;;
             --ssh-port|--swap-mb|--allow|--hostname|--timezone)
                 [[ $# -ge 2 ]] || die "$1 缺少参数"
                 case $1 in
-                    --ssh-port) SSH_PORT=$2; [[ $2 == auto ]] || port_valid "$2" || die '无效 SSH 端口';;
-                    --swap-mb) uint "$2" && (( 10#$2 >= 64 && 10#$2 <= 65536 )) || die 'swap 范围为 64–65536 MiB'; SWAP_MB=$((10#$2));;
+                    --ssh-port)
+                        if [[ $2 == auto ]]; then SSH_PORT=auto
+                        else port_valid "$2" || die '无效 SSH 端口'; SSH_PORT=$((10#$2)); fi;;
+                    --swap-mb)
+                        uint "$2" || die 'swap 必须是整数'
+                        (( 10#$2 >= 64 && 10#$2 <= 65536 )) || die 'swap 范围为 64–65536 MiB'
+                        SWAP_MB=$((10#$2));;
                     --allow) validate_allow "$2"; ALLOW+=("$2");;
                     --hostname) [[ $2 =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]{0,61}[a-zA-Z0-9])?$ ]] || die '无效主机名'; HOSTNAME_NEW=$2;;
                     --timezone) [[ $2 =~ ^[a-zA-Z0-9_+-]+(/[a-zA-Z0-9_+-]+)*$ ]] || die '无效时区'; TIMEZONE_NEW=$2;;
@@ -122,8 +129,12 @@ write_file() {
     mkdir -p "$(dirname "$target")"
     tmp=$(mktemp "$(dirname "$target")/.vps-init.XXXXXX")
     cat > "$tmp"
-    chmod 600 "$tmp"
+    if [[ -f $target ]]; then
+        chmod --reference="$target" "$tmp"
+        chown --reference="$target" "$tmp"
+    else chmod 600 "$tmp"; fi
     mv -f -- "$tmp" "$target"
+    if has restorecon; then restorecon "$target"; fi
     cp -p -- "$target" "$TX/after$target"
 }
 set_sysctl() {
@@ -155,11 +166,40 @@ report() {
     if (( EUID == 0 )) && has sshd; then sshd -t && sshd -T | awk '$1 ~ /^(port|permitrootlogin|passwordauthentication|pubkeyauthentication)$/'; fi
 }
 show_plan() {
+    say "检测：$DIST $VERSION；内核 $(uname -r)；$INIT；内存 ${RAM_MB} MiB；受限环境=$LIMITED。"
     say '一键计划：日志轮转、内存/swap、TCP/UDP/BBR、安全基线、磁盘维护、SSH/防火墙。'
     say "SSH：$SSH_PORT（保留现端口=$KEEP_SSH）；swap：$SWAP_MB MiB（禁用=$NO_SWAP；zram=$ZRAM）。"
     say "安装工具=$INSTALL；安全更新=$UPDATES；CPU performance=$CPU_PERFORMANCE；Docker 日志=$DOCKER_LOG。"
     say '适用模块才执行；已有服务/转发/防火墙冲突会跳过并说明；不会自动重启机器。'
     say 'SSH 变更需从新端口重新登录确认；云安全组和 NAT 映射需由你放行。'
+}
+verify_managed() {
+    local file key wanted actual failed=0 pending
+    for file in /etc/sysctl.d/60-vps-init-network.conf /etc/sysctl.d/60-vps-init-security.conf; do
+        [[ -f $file ]] || continue
+        while IFS='=' read -r key wanted; do
+            key=$(printf '%s' "$key" | tr -d ' \t')
+            [[ -n $key && $key != \#* ]] || continue
+            [[ $key =~ ^[a-z0-9_.]+$ ]] || { say "[异常] 无效管理参数 $key"; failed=1; continue; }
+            wanted=$(printf '%s\n' "$wanted" | awk '{$1=$1;print}')
+            actual=$(sysctl -n "$key" 2>/dev/null | awk '{$1=$1;print}') || { say "[失败] 无法读取 $key"; failed=1; continue; }
+            if [[ $actual == "$wanted" ]]; then say "[生效] $key=$actual"
+            else say "[不一致] $key 期望 $wanted，实际 $actual"; failed=1; fi
+        done < "$file"
+    done
+    if (( EUID == 0 )); then
+        for pending in "$STATE"/*/access.pending; do
+            [[ ! -f $pending ]] || { say "[待确认] ${pending%/*}"; failed=1; }
+        done
+        if [[ -f /etc/ssh/vps-init-port ]]; then
+            wanted=$(cat /etc/ssh/vps-init-port)
+            actual=$(sshd -T | awk '$1=="port" {print $2}')
+            [[ $actual == "$wanted" ]] || { say '[不一致] SSH 配置端口与已确认端口不同'; failed=1; }
+            [[ -n $(ss -H -ltn "sport = :$wanted") ]] || { say '[失败] 已确认端口未监听'; failed=1; }
+        fi
+    else say '[未验证] 非 root 无法完整检查访问配置及事务状态'; fi
+    if (( failed )); then return 1; fi
+    say '可读取的已管理参数检查通过；重启、外部连通性和性能收益需要独立验证。'
 }
 on_error() {
     local code=$1 line=$2
@@ -183,8 +223,13 @@ rollback() {
         cmp -s "$TX/nft.current" "$TX/nft.after" || die '防火墙在事务后变化，拒绝覆盖'
     fi
     if [[ -f $TX/zram.created ]]; then
+        /usr/local/sbin/vps-init-zram stop
         if [[ $INIT == systemd ]]; then systemctl disable --now vps-init-zram.service
         else rc-service vps-init-zram stop; rc-update del vps-init-zram default; fi
+    fi
+    if [[ -f $TX/cpu.created ]]; then
+        if [[ $INIT == systemd ]]; then systemctl disable --now vps-init-cpu.service
+        else rc-service vps-init-cpu stop; rc-update del vps-init-cpu default; fi
     fi
     if [[ -f $TX/nft.service ]]; then systemctl disable vps-init-firewall.service; fi
     if [[ -f $TX/swap.created ]]; then
@@ -203,7 +248,12 @@ rollback() {
         [[ ! -f $TX/logs.changed ]] || systemctl restart systemd-journald
         [[ ! -f $TX/hostname.before ]] || hostnamectl set-hostname "$(cat "$TX/hostname.before")"
         [[ ! -f $TX/timezone.before ]] || timedatectl set-timezone "$(cat "$TX/timezone.before")"
-        if [[ -f $TX/fstrim.before && $(cat "$TX/fstrim.before") == disabled ]]; then systemctl disable --now fstrim.timer; fi
+        if [[ -f $TX/fstrim.before && $(cat "$TX/fstrim.before") == disabled ]]; then systemctl disable fstrim.timer; fi
+        if [[ -f $TX/fstrim.active && $(cat "$TX/fstrim.active") != active ]]; then systemctl stop fstrim.timer; fi
+        if [[ -f $TX/fail2ban.active ]]; then
+            if [[ $(cat "$TX/fail2ban.active") == active ]]; then systemctl restart fail2ban
+            else systemctl stop fail2ban; fi
+        fi
     fi
     touch "$TX/rolled-back"
     say '配置回滚完成；软件包更新、已轮转日志和外部状态不支持撤销。'
