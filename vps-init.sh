@@ -5,6 +5,7 @@ IFS=$'\n\t'
 umask 077
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
+export LC_ALL=C
 BASE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$BASE/lib/core.sh"
 source "$BASE/lib/modules.sh"
@@ -66,6 +67,7 @@ main() {
             trap 'on_error "$?" "$LINENO"' ERR
             trap 'die "执行被中断；请查看事务并运行 rollback"' INT TERM
             install_tools
+            require_commands
             basic_init
             configure_logs
             configure_memory
@@ -81,8 +83,8 @@ main() {
             say "恢复命令：sudo bash $BASE/vps-init.sh rollback $TXID"
             say '跳过项及待验证项不计为优化成功；性能收益需在相同负载下测量。'
             ;;
-        rollback) require_root; acquire_lock; load_transaction "$tx"; rollback;;
-        confirm-ssh) require_root; acquire_lock; load_transaction "$tx"; confirm_ssh;;
+        rollback) require_root; require_commands; acquire_lock; load_transaction "$tx"; rollback;;
+        confirm-ssh) require_root; require_commands; acquire_lock; load_transaction "$tx"; confirm_ssh;;
         *) usage; die "未知命令：$command";;
     esac
 }

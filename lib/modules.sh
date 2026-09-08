@@ -2,10 +2,10 @@
 install_tools() {
     (( INSTALL )) || { skip '未选择安装工具；使用已有命令'; return; }
     case $DIST in
-        debian|ubuntu) apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y util-linux procps iproute2 logrotate openssh-server nftables;;
-        rocky|almalinux|rhel|fedora) dnf install -y util-linux procps-ng iproute logrotate openssh-server nftables;;
-        alpine) apk add util-linux procps iproute2 logrotate openssh nftables;;
-        opensuse*|sles) zypper --non-interactive install util-linux procps iproute2 logrotate openssh nftables;;
+        debian|ubuntu) apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y util-linux procps iproute2 logrotate openssh-server nftables diffutils kmod;;
+        rocky|almalinux|rhel|fedora) dnf install -y util-linux procps-ng iproute logrotate openssh-server nftables diffutils kmod;;
+        alpine) apk add coreutils util-linux procps iproute2 logrotate openssh nftables diffutils kmod;;
+        opensuse*|sles) zypper --non-interactive install util-linux procps iproute2 logrotate openssh nftables diffutils kmod;;
     esac
 }
 basic_init() {

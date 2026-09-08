@@ -216,6 +216,7 @@ configure_access() {
 }
 prepare_identity() {
     if ! has ssh-keygen || ! has visudo || ! has getent; then die '公钥管理员需要 ssh-keygen、sudo/visudo 与 getent'; fi
+    visudo -c
     [[ $(stat -c %s "$PUBLIC_KEY") -le 16384 ]] || die '公钥文件过大'
     [[ $(awk 'NF {n++} END {print n+0}' "$PUBLIC_KEY") == 1 ]] || die '仅接受一个公钥'
     grep -qE '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)) [A-Za-z0-9+/]+={0,3}([[:space:]].*)?$' "$PUBLIC_KEY" || die '需要 OpenSSH 公钥，不能提供私钥或 authorized_keys 选项'

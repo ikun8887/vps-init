@@ -91,6 +91,12 @@ require_root() {
     (( SUPPORTED )) || die "发行版 $DIST 未适配，仅允许 check/plan/verify"
     [[ $INIT != unknown ]] || die '未识别服务管理器，仅允许只读检查'
 }
+require_commands() {
+    local needed
+    for needed in awk cat cmp cp date df getconf grep mktemp mv mkdir sed stat sysctl tr chmod chown; do
+        has "$needed" || die "缺少必需命令 $needed；请先通过发行版软件源安装，尚未应用优化配置"
+    done
+}
 acquire_lock() {
     has flock || die '需要 util-linux 的 flock；请先通过系统软件源安装'
     [[ ! -L $STATE ]] || die '状态目录不可为符号链接'
@@ -112,7 +118,21 @@ begin_transaction() {
     : > "$TX/manifest"
     : > "$TX/sysctl.before"
     : > "$TX/sysfs.before"
-    exec > >(tee -a "$TX/run.log") 2>&1
+    # 终端保留完整输出，事务日志立即限制为约 1 MiB，避免等待每日轮转。
+    exec > >(awk -v logfile="$TX/run.log" '
+        BEGIN {limit=1048576; used=0}
+        {
+            print; fflush()
+            if (used < limit) {
+                text=$0 ORS
+                remaining=limit-used
+                if (length(text)>remaining) text=substr(text,1,remaining)
+                printf "%s",text >> logfile
+                used+=length(text)
+                if (used>=limit) print "\n[日志达到保存上限，后续输出仅显示在终端]" >> logfile
+                fflush(logfile)
+            }
+        }') 2>&1
     say "事务 $TXID"
 }
 load_transaction() {
@@ -139,8 +159,8 @@ write_file() {
     tmp=$(mktemp "$(dirname "$target")/.vps-init.XXXXXX")
     cat > "$tmp"
     if [[ -f $target ]]; then
-        chmod --reference="$target" "$tmp"
-        chown --reference="$target" "$tmp"
+        chmod "$(stat -c %a "$target")" "$tmp"
+        chown "$(stat -c %u:%g "$target")" "$tmp"
     else chmod 600 "$tmp"; fi
     mv -f -- "$tmp" "$target"
     if has restorecon; then restorecon "$target"; fi

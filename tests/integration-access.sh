@@ -6,6 +6,8 @@ set -Eeuo pipefail
     exit 1
 }
 [[ $EUID == 0 ]] || exit 1
+# GitHub runner 镜像的 sudoers 文件可能为 0644；测试基线先满足 visudo 的权限检查。
+if [[ -f /etc/sudoers.d/runner ]]; then chmod 440 /etc/sudoers.d/runner; fi
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MODE=${1:-service}
 IDENTITY=${2:-plain}
