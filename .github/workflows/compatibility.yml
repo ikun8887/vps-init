@@ -1,0 +1,31 @@
+name: 发行版基础兼容检查
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  containers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - debian:12
+          - debian:13
+          - ubuntu:22.04
+          - ubuntu:24.04
+          - ubuntu:26.04
+          - almalinux:8
+          - almalinux:9
+          - almalinux:10
+          - alpine:3.24
+          - registry.opensuse.org/opensuse/leap:16.0
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: 临时容器基础检查（不代表内核/启动兼容验证）
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          docker pull "$IMAGE"
+          docker image inspect "$IMAGE" --format '{{json .RepoDigests}}'
+          docker run --rm --volume "$PWD:/workspace:ro" --workdir /workspace "$IMAGE" sh tests/container-smoke.sh

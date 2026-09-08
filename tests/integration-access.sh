@@ -89,3 +89,22 @@ fi
 "${SSH[@]}" -p 22220 root@127.0.0.1 true
 [[ ! -e /etc/ssh/vps-init-port && -f /var/lib/vps-init/$tx/rolled-back ]]
 printf 'PASS: %s 一键执行、新连接确认、旧端口关闭和恢复旧登录。\n' "$MODE"
+if [[ $IDENTITY == plain ]]; then
+    # 第二个事务不确认新入口，缩短测试计时，实际调用独立恢复服务。
+    "${SSH[@]}" -p 22220 root@127.0.0.1 "bash '$ROOT/vps-init.sh' optimize --yes --no-swap --ssh-port 22221"
+    pending=(/var/lib/vps-init/*/access.pending)
+    [[ ${#pending[@]} == 1 && -f ${pending[0]} ]]
+    tx=${pending[0]%/access.pending}; tx=${tx##*/}
+    unit="vps-init-recovery-$tx"
+    systemctl stop "$unit.timer"
+    sed -i 's/OnActiveSec=5min/OnActiveSec=3s/' "/etc/systemd/system/$unit.timer"
+    systemctl daemon-reload
+    systemctl start "$unit.timer"
+    for ((i=0; i<30; i++)); do
+        [[ ! -f /var/lib/vps-init/$tx/rolled-back ]] || break
+        sleep 1
+    done
+    [[ -f /var/lib/vps-init/$tx/rolled-back ]]
+    "${SSH[@]}" -p 22220 root@127.0.0.1 true
+    printf 'PASS: 无需原 SSH 会话或人工干预的定时恢复。\n'
+fi
