@@ -37,10 +37,31 @@ ListenStream=127.0.0.1:22220
 EOF
     systemctl daemon-reload
     systemctl start ssh.socket
-else systemctl start ssh.service; fi
+else
+    # Ubuntu 24 的发行版 drop-in 会拉起 socket，显式构造独立服务测试场景。
+    mkdir -p /etc/systemd/system/ssh.service.d
+    cat > /etc/systemd/system/ssh.service.d/99-integration.conf <<'EOF'
+[Unit]
+Requires=
+Wants=
+[Service]
+Type=simple
+ExecStart=
+ExecStart=/usr/sbin/sshd -D -e
+ExecReload=
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+EOF
+    systemctl daemon-reload
+    systemctl start ssh.service
+fi
 ufw allow 22220/tcp
 ufw --force enable
 SSH=(ssh -i "$TMP/key" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o "UserKnownHostsFile=$TMP/known_hosts")
+for ((i=0; i<50; i++)); do
+    [[ -z $(ss -H -ltn 'sport = :22220') ]] || break
+    sleep 0.1
+done
 "${SSH[@]}" -p 22220 root@127.0.0.1 true
 # 从旧会话运行一键优化，验证服务重载/重启不会杀死该会话。
 "${SSH[@]}" -p 22220 root@127.0.0.1 "bash '$ROOT/vps-init.sh' optimize --yes --no-swap --ssh-port 22221"

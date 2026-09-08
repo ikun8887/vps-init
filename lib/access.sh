@@ -10,6 +10,14 @@ firewall_detect() {
         else FW=unknown; fi
     fi
 }
+wait_listener() {
+    local port=$1 attempt
+    for ((attempt=0; attempt<50; attempt++)); do
+        if [[ -n $(ss -H -ltn "sport = :$port") ]]; then return 0; fi
+        sleep 0.1
+    done
+    return 1
+}
 firewall_open() {
     local proto=$1 port=$2
     case $FW in
@@ -162,7 +170,7 @@ configure_access() {
         systemctl restart "$socket"
         systemctl start "$service.service"
     else service_reload "$service"; fi
-    [[ -n $(ss -H -ltn "sport = :$target") ]] || die '新端口未监听，将由恢复任务还原'
+    wait_listener "$target" || die '新端口未监听，将由恢复任务还原'
     say "[待确认] 请在 5 分钟内从新端口 $target 重新 SSH 登录，然后执行："
     say "sudo bash $BASE/vps-init.sh confirm-ssh $TXID"
     say '云安全组/NAT 未放行时保留当前会话；超时恢复整个配置事务。'
@@ -250,7 +258,7 @@ confirm_ssh() {
         systemctl start "$service.service"
         socket_port_only "$socket" "$target" || die 'socket 实际绑定仍含旧端口，保留恢复任务'
     else service_reload "$service"; fi
-    [[ -n $(ss -H -ltn "sport = :$target") ]] || die '新端口监听异常'
+    wait_listener "$target" || die '新端口监听异常'
     FW=$(cat "$TX/firewall.kind")
     if [[ $FW == nft ]]; then
         # 只删除本次额外保留的旧 SSH accept；其余业务端口保持原规则。

@@ -22,3 +22,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y openssh-server ufw logrotate
       - name: 测试一键流程和 SSH 恢复
         run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT env VPS_INIT_DISPOSABLE_VM=1 bash tests/integration-access.sh '${{ matrix.mode }}'
+      - name: 失败诊断
+        if: failure()
+        run: |
+          sudo systemctl status ssh.service ssh.socket --no-pager || true
+          sudo journalctl -u ssh.service --no-pager -n 30 || true
