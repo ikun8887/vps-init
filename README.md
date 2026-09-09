@@ -15,7 +15,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ikun8887/vps-init/v0.3.0-bet
 **直接一键优化，不再选择菜单：**
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/ikun8887/vps-init/v0.3.0-beta.1/install.sh) optimize --yes --install-tools --cpu-performance --enable-ntp --docker-log-limit
+bash <(curl -fsSL https://raw.githubusercontent.com/ikun8887/vps-init/v0.3.0-beta.1/install.sh) auto
 ```
 
 安装后输入 `vps-init` 随时打开菜单。重复执行安装命令会重装该固定版本工具，保留配置及备份；以后升级只需改用新版本安装地址。下载程序和 SHA256 校验表均来自本仓库固定发行版，校验可发现下载损坏，仍需信任仓库发布者。

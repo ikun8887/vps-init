@@ -127,7 +127,7 @@ fi
 grep -Fq '[修复] 恢复上次未完成的 SSH 操作' "$TMP/recovery-output"
 for marker in /var/lib/vps-init/*/access.pending; do [[ ! -f $marker ]]; done
 "${SSH[@]}" -p 22220 root@127.0.0.1 true
-"${SSH[@]}" -p 22220 root@127.0.0.1 "bash '$ROOT/vps-init.sh' optimize --yes --no-swap --ssh-port 22221" > "$TMP/default-output"
+"${SSH[@]}" -p 22220 root@127.0.0.1 "bash '$ROOT/vps-init.sh' auto --no-swap --ssh-port 22221" > "$TMP/default-output"
 grep -Fq 'SSH 新端口：22221（已生效' "$TMP/default-output"
 if grep -q '^确认命令（' "$TMP/default-output"; then exit 1; fi
 [[ $(wc -l < "$TMP/default-output") -lt 100 ]]

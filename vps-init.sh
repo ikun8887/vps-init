@@ -21,6 +21,7 @@ VPS Init 0.3.0-beta.1
   network                网络、BBR/BBRv3 能力与调优计划检查（只读）
   plan                   一键优化预览（默认）
   optimize               一键优化：适配当前能力，备份后应用全部基础模块
+  auto                   直接一键：自动依赖、CPU、已有 NTP、Docker 日志，执行后显示结果
   apply <模块>           单独安装/重复应用：logs memory cpu network security disk ssh firewall docker fail2ban time
   uninstall              按逆序恢复所有配置并卸载工具；保留备份和软件包
   uninstall --keep-config 只卸载工具，保留系统优化配置
@@ -63,6 +64,9 @@ main() {
         if [[ -t 0 && -t 1 ]]; then command=menu; else command=plan; fi
     fi
     [[ $# == 0 ]] || shift
+    if [[ $command == auto ]]; then
+        command=optimize YES=1 INSTALL=1 CPU_PERFORMANCE=1 ENABLE_NTP=1 DOCKER_LOG=1
+    fi
     if [[ $command == rollback || $command == confirm-ssh ]]; then
         tx=${1:-}; [[ $# == 0 ]] || shift
     fi

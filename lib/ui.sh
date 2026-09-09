@@ -136,7 +136,7 @@ ui_menu() {
         ui_menu_body
         read -r -p '选择操作 [0]：' choice || return 0
         case ${choice:-0} in
-            1) ui_exec optimize --yes --install-tools --cpu-performance --enable-ntp --docker-log-limit;;
+            1) ui_exec auto;;
             2) ui_custom;;
             3) ui_identity;;
             4) report; ui_pause;;
