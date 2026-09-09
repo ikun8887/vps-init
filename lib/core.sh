@@ -4,8 +4,10 @@ CPU_PERFORMANCE=0 ZRAM=0 DOCKER_LOG=0 HOSTNAME_NEW='' TIMEZONE_NEW=''
 FAIL2BAN=0
 NETWORK_PROFILE=balanced BANDWIDTH_MBPS=0 RTT_MS=0 KEEP_BBR=0 DEFAULT_FQ=0 ENABLE_NTP=0
 NO_COLOR_OPTION=0 MODULE_INDEX=0 RUN_STARTED=-1
+STRICT_SSH=0 MODULE_TOTAL=0 LOG_FD='' LOG_PID='' CONSOLE_SAVED=0
 ADMIN_USER='' PUBLIC_KEY='' DISABLE_PASSWORD=0 DISABLE_ROOT=0
 STATE=/var/lib/vps-init
+SELECTED_MODULE=all KEEP_CONFIG=0
 declare -a ALLOW=()
 CURRENT_MODULE='' MODULE_SKIP_COUNT=0 RUN_ACTION=''
 say() { printf '%s\n' "$*"; }
@@ -19,16 +21,36 @@ skip() {
 run_module() {
     local label=$1 enabled=$2
     shift 2
+    if (( ! enabled )); then return; fi
     MODULE_INDEX=$((MODULE_INDEX+1))
-    ui_section "[$MODULE_INDEX/11] $label"
-    if (( ! enabled )); then printf '%s\t未启用\n' "$label" >> "$TX/results.tsv"; say '未启用，保留现状。'; return; fi
+    ui_section "[$MODULE_INDEX/$MODULE_TOTAL] $label"
     CURRENT_MODULE=$label MODULE_SKIP_COUNT=0
+    start_module_log
     # 不放入 if/|| 条件，避免 Bash 关闭被调用函数内部的 errexit。
-    "$@"
+    "$@" >&"$LOG_FD" 2>&1
+    close_module_log
     local status=已处理
     (( ! MODULE_SKIP_COUNT )) || status='已处理（有跳过项）'
     printf '%s\t%s\n' "$label" "$status" >> "$TX/results.tsv"
+    ui_line '32' "  ✓ $status"
     CURRENT_MODULE=''
+}
+start_module_log() {
+    local used=0
+    if (( ! CONSOLE_SAVED )); then exec 3>&1 4>&2; CONSOLE_SAVED=1; fi
+    [[ ! -f $TX/run.log ]] || used=$(wc -c < "$TX/run.log")
+    # 只收集当前模块输出。显式等待写入完成，避免会话结束时摘要丢失。
+    exec {LOG_FD}> >(exec 9>&-; awk -v used="$used" -v logfile="$TX/run.log" '
+        { if (used < 1048576) {
+            text=$0 ORS; gsub(/\033\[[0-9;]*m/, "", text)
+            text=substr(text,1,1048576-used); printf "%s",text >> logfile
+            used+=length(text); fflush(logfile)
+        }}')
+    LOG_PID=$!
+}
+close_module_log() {
+    if [[ -n $LOG_FD ]]; then exec {LOG_FD}>&-; LOG_FD=''; fi
+    if [[ -n $LOG_PID ]]; then wait "$LOG_PID"; LOG_PID=''; fi
 }
 render_summary() {
     local code=$1 label status target='' old='' current='' user_name
@@ -36,7 +58,7 @@ render_summary() {
     if (( RUN_STARTED >= 0 )); then say "运行耗时：$((SECONDS-RUN_STARTED)) 秒"; fi
     if (( code )); then say "结果：执行失败（退出码 $code），未完成的步骤不可视为成功。"
     elif [[ -f $TX/rolled-back ]]; then say '结果：事务已回滚。'
-    elif [[ -f $TX/access.pending ]]; then say '结果：配置流程已结束；SSH 仍待新连接确认。'
+    elif [[ -f $TX/access.pending ]]; then say '结果：配置流程已结束；可选的 SSH 严格加固仍待新连接确认。'
     elif [[ $RUN_ACTION == confirm-ssh ]]; then say '结果：SSH 新入口已确认。'
     else say '结果：配置流程已结束。'; fi
     say "事务 ID：$TXID"
@@ -45,7 +67,6 @@ render_summary() {
             while IFS=$'\t' read -r label status; do say "  $label：$status"; done < "$TX/results.tsv"
         fi
         [[ -z $CURRENT_MODULE ]] || say "  $CURRENT_MODULE：失败或中断"
-        say '“已处理”表示模块流程返回，不代表每项参数均修改或性能必然提升。'
         if [[ -s $TX/skipped.txt ]]; then say '跳过原因：'; cat "$TX/skipped.txt"; fi
     fi
     [[ ! -f $TX/ssh.target ]] || target=$(cat "$TX/ssh.target")
@@ -55,6 +76,7 @@ render_summary() {
         say "SSH 目标端口：$target（待确认；旧入口暂时保留）"
     elif [[ -f $TX/rolled-back && -n $target ]]; then
         say "SSH 本次目标端口：$target（已回滚，以当前配置为准）"
+    elif [[ -f $TX/access.ready ]]; then say "SSH 新端口：$target（已生效；原入口保留，无需确认命令）"
     elif [[ -f $TX/access.confirmed ]]; then say "SSH 已确认端口：$target"
     else say 'SSH：本次未完成新的端口迁移，保留现有配置。'; fi
     if has sshd; then
@@ -93,6 +115,7 @@ render_summary() {
     fi
     say "备份和日志：$TX"
     say "结果文件：$TX/summary.txt"
+    if (( code )) && [[ -s $TX/run.log ]]; then say '最后的执行记录：'; tail -n 12 "$TX/run.log"; fi
     if [[ ! -f $TX/rolled-back ]]; then
         printf '回滚命令：sudo bash %q rollback %q\n' "$BASE/vps-init.sh" "$TXID"
     fi
@@ -102,9 +125,10 @@ finish_output() {
     local code=$1
     trap - ERR EXIT
     set +e
+    if (( CONSOLE_SAVED )); then exec 1>&3 2>&4; fi
+    close_module_log
     # 摘要独立保存，即使 run.log 已达容量上限仍可查看；保留原执行退出码。
-    UI_COLOR=0 render_summary "$code" > "$TX/summary.txt"
-    if [[ $? == 0 ]]; then ui_show_summary "$TX/summary.txt"
+    if UI_COLOR=0 render_summary "$code" > "$TX/summary.txt"; then ui_show_summary "$TX/summary.txt"
     else say "[错误] 无法完整保存运行摘要：$TX/summary.txt" >&2; fi
     exit "$code"
 }
@@ -128,6 +152,8 @@ parse_options() {
             --default-fq) DEFAULT_FQ=1;;
             --enable-ntp) ENABLE_NTP=1;;
             --no-color) NO_COLOR_OPTION=1;;
+            --strict-ssh) STRICT_SSH=1;;
+            --keep-config) KEEP_CONFIG=1;;
             --disable-password-login) DISABLE_PASSWORD=1;;
             --disable-root-login) DISABLE_ROOT=1;;
             --ssh-port|--swap-mb|--allow|--hostname|--timezone|--admin-user|--public-key|--network-profile|--bandwidth-mbps|--rtt-ms)
@@ -147,8 +173,8 @@ parse_options() {
                     --public-key) PUBLIC_KEY=$2;;
                     --network-profile)
                         case $2 in conservative|balanced|throughput) NETWORK_PROFILE=$2;; *) die '网络档位：conservative/balanced/throughput';; esac;;
-                    --bandwidth-mbps) uint "$2" && (( 10#$2 >= 1 && 10#$2 <= 100000 )) || die '带宽范围 1–100000 Mbps'; BANDWIDTH_MBPS=$((10#$2));;
-                    --rtt-ms) uint "$2" && (( 10#$2 >= 1 && 10#$2 <= 2000 )) || die 'RTT 范围 1–2000 ms'; RTT_MS=$((10#$2));;
+                    --bandwidth-mbps) if ! uint "$2" || (( 10#$2 < 1 || 10#$2 > 100000 )); then die '带宽范围 1–100000 Mbps'; fi; BANDWIDTH_MBPS=$((10#$2));;
+                    --rtt-ms) if ! uint "$2" || (( 10#$2 < 1 || 10#$2 > 2000 )); then die 'RTT 范围 1–2000 ms'; fi; RTT_MS=$((10#$2));;
                 esac
                 shift;;
             *) die "未知选项：$1";;
@@ -162,6 +188,7 @@ parse_options() {
     if [[ -n $ADMIN_USER || -n $PUBLIC_KEY ]] || (( DISABLE_PASSWORD || DISABLE_ROOT )); then
         [[ -n $ADMIN_USER && -n $PUBLIC_KEY ]] || die '登录加固需要同时提供 --admin-user 与 --public-key'
         [[ -f $PUBLIC_KEY && -r $PUBLIC_KEY ]] || die '公钥文件不可读取'
+        STRICT_SSH=1
     fi
 }
 validate_allow() {
@@ -220,33 +247,66 @@ acquire_lock() {
 }
 begin_transaction() {
     acquire_lock
-    local pending
-    for pending in "$STATE"/*/access.pending; do
-        [[ ! -f $pending ]] || die '已有 SSH 事务等待确认或恢复，请先完成该事务'
-    done
+    recover_pending
     TXID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
     TX="$STATE/$TXID"
     mkdir -m 700 "$TX" "$TX/files" "$TX/after"
     : > "$TX/manifest"
     : > "$TX/sysctl.before"
     : > "$TX/sysfs.before"
-    # 终端保留完整输出，事务日志立即限制为约 1 MiB，避免等待每日轮转。
-    exec > >(awk -v logfile="$TX/run.log" '
-        BEGIN {limit=1048576; used=0}
-        {
-            print; fflush()
-            if (used < limit) {
-                text=$0 ORS
-                gsub(/\033\[[0-9;]*m/, "", text)
-                remaining=limit-used
-                if (length(text)>remaining) text=substr(text,1,remaining)
-                printf "%s",text >> logfile
-                used+=length(text)
-                if (used>=limit) print "\n[日志达到保存上限，后续输出仅显示在终端]" >> logfile
-                fflush(logfile)
-            }
-        }') 2>&1
-    say "事务 $TXID"
+    printf '%s\n' "$TXID" >> "$STATE/history"
+}
+recover_pending() {
+    local pending
+    for pending in "$STATE"/*/access.pending; do
+        [[ -f $pending ]] || continue
+        load_transaction "$(basename "${pending%/*}")"
+        say "[修复] 恢复上次未完成的 SSH 操作 $TXID，然后继续本次执行。"
+        # 使用真实回滚和冲突检查，不删除状态标记来假装恢复成功。
+        rollback
+    done
+}
+transaction_order() {
+    local directory
+    # 旧版无顺序文件；新版按持锁时追加的真实执行顺序恢复，避免同秒 PID 排序失真。
+    {
+        for directory in "$STATE"/*; do
+            [[ -d $directory && ! -L $directory && -f $directory/manifest ]] || continue
+            if [[ ! -f $STATE/history ]] || ! grep -Fxq "${directory##*/}" "$STATE/history"; then
+                printf '%s\n' "${directory##*/}"
+            fi
+        done
+        [[ ! -f $STATE/history ]] || cat "$STATE/history"
+    } | awk '!seen[$0]++ {ids[++n]=$0} END {for(i=n;i>0;i--) print ids[i]}'
+}
+uninstall_tool() {
+    require_root; require_commands; acquire_lock
+    if (( ! YES )); then
+        local answer
+        read -r -p '恢复优化配置并卸载工具（备份保留）？输入 yes：' answer
+        [[ $answer == yes ]] || die '已取消'
+    fi
+    local id count=0
+    if (( KEEP_CONFIG )); then
+        # 未完成的访问操作不可遗留给已卸载的入口。
+        recover_pending
+    else
+        while IFS= read -r id; do
+            load_transaction "$id"
+            [[ ! -f $TX/rolled-back ]] || continue
+            say "[恢复] $id"
+            rollback
+            count=$((count+1))
+        done < <(transaction_order)
+    fi
+    # 只删除本工具安装器拥有的三个文件；不递归删除目录或第三方文件。
+    if [[ -f /usr/local/lib/vps-init/.managed && ! -L /usr/local/lib/vps-init ]]; then
+        if [[ -f /usr/local/bin/vps-init && ! -L /usr/local/bin/vps-init ]] && grep -Fxq '# VPS-INIT LAUNCHER' /usr/local/bin/vps-init; then rm /usr/local/bin/vps-init; fi
+        rm -f /usr/local/lib/vps-init/vps-init.sh /usr/local/lib/vps-init/.managed
+        rmdir /usr/local/lib/vps-init 2>/dev/null || say '安装目录含其他文件，已保留。'
+    fi
+    say "卸载完成：恢复 $count 次操作；备份保留在 $STATE。软件包、用户及业务数据保留。"
+    if has sshd; then sshd -T | awk '$1=="port" {print "当前 SSH 端口：" $2}'; fi
 }
 load_transaction() {
     [[ $1 =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]] || die '无效事务 ID'
@@ -317,7 +377,7 @@ show_plan() {
     (( ! DEFAULT_FQ )) || say '默认 FQ 只影响之后创建队列的设备；不会替换现有 tc 队列树。'
     say "启用已安装的时间同步服务=$ENABLE_NTP。"
     say '适用模块才执行；已有服务/转发/防火墙冲突会跳过并说明；不会自动重启机器。'
-    say 'SSH 变更需从新端口重新登录确认；云安全组和 NAT 映射需由你放行。'
+    say '普通模式：新端口生效后保留旧入口，直接完成；云安全组/NAT 需放行新端口。'
     if [[ -n $ADMIN_USER ]]; then say "登录加固：管理员 $ADMIN_USER，配置公钥和免密码 sudo；新公钥登录确认后才关闭指定认证方式。"; fi
 }
 verify_managed() {
@@ -341,7 +401,7 @@ verify_managed() {
         if [[ -f /etc/ssh/vps-init-port ]]; then
             wanted=$(cat /etc/ssh/vps-init-port)
             actual=$(sshd -T | awk '$1=="port" {print $2}')
-            [[ $actual == "$wanted" ]] || { say '[不一致] SSH 配置端口与已确认端口不同'; failed=1; }
+            grep -Fxq "$wanted" <<< "$actual" || { say '[不一致] SSH 配置中缺少管理端口'; failed=1; }
             [[ -n $(ss -H -ltn "sport = :$wanted") ]] || { say '[失败] 已确认端口未监听'; failed=1; }
         fi
     else say '[未验证] 非 root 无法完整检查访问配置及事务状态'; fi

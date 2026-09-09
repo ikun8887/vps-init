@@ -116,7 +116,7 @@ grep -Fq 'SSH 目标端口：22222（待确认' "$WORK/summary"
 grep -Fq 'SSH 原端口：22' "$WORK/summary"
 grep -Fq 'SSH 当前配置端口：22,22222' "$WORK/summary"
 grep -Fq 'CPU：已处理（有跳过项）' "$WORK/summary"
-grep -Fq 'Docker：未启用' "$WORK/summary"
+if grep -Fq 'Docker：' "$WORK/summary"; then exit 1; fi
 grep -Fq -- '--preserve-env=SSH_CONNECTION bash' "$WORK/summary"
 printf 'vpsadmin\n' > "$TX/identity.user"
 render_summary 0 > "$WORK/summary"
@@ -170,4 +170,35 @@ if grep -q $'\033' "$WORK/menu"; then exit 1; fi
 if (ui_menu </dev/null) > "$WORK/menu-error" 2>&1; then exit 1; fi
 grep -Fq '菜单需要交互终端' "$WORK/menu-error"
 ok '中文菜单纯文本降级及非交互调用拒绝'
+
+mkdir -p "$WORK/order/20260909T000000Z-10" "$WORK/order/20260909T000000Z-2"
+touch "$WORK/order/20260909T000000Z-10/manifest" "$WORK/order/20260909T000000Z-2/manifest"
+printf '20260909T000000Z-10\n20260909T000000Z-2\n' > "$WORK/order/history"
+STATE="$WORK/order"
+[[ $(transaction_order | head -n 1) == 20260909T000000Z-2 ]]
+ok '卸载按真实执行顺序反向恢复，不用 PID 推测先后'
+
+# 真实临时文件模拟用户遗留的事务，执行已有回滚；只替代外部服务操作。
+TXID=20260909T000000Z-3 TX="$STATE/20260909T000000Z-3"
+mkdir -p "$TX/files" "$TX/after"
+: > "$TX/manifest"; : > "$TX/sysctl.before"; : > "$TX/sysfs.before"
+target="$WORK/legacy-config"
+printf 'before\n' > "$target"
+write_file "$target" <<< incomplete
+touch "$TX/access.pending"
+INIT=unknown
+rollback_access() { rm -f "$TX/access.pending"; }
+recover_pending
+[[ $(cat "$target") == before && -f $TX/rolled-back && ! -e $TX/access.pending ]]
+recover_pending
+ok '旧版未完成事务自动恢复且可重复运行'
+
+TX="$WORK/quiet" TXID=20260909T000000Z-4
+mkdir "$TX"
+# shellcheck disable=SC2329,SC2317
+noisy_module() { for ((i=0;i<2000;i++)); do printf 'logrotate debug line %s\n' "$i"; done; }
+run_module 日志轮转 1 noisy_module > "$WORK/quiet-console"
+[[ $(wc -l < "$WORK/quiet-console") -lt 8 ]]
+grep -Fq 'logrotate debug line 1999' "$TX/run.log"
+ok '模块输出进入日志并等待写完，终端不会被调试信息刷屏'
 printf '%s checks passed\n' "$passed"

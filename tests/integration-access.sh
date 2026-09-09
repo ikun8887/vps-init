@@ -71,7 +71,7 @@ extra=''
 if [[ $IDENTITY == identity ]]; then
     extra="--admin-user vpscheck --public-key '$TMP/key.pub' --disable-password-login --disable-root-login"
 fi
-"${SSH[@]}" -p 22220 root@127.0.0.1 "bash '$ROOT/vps-init.sh' optimize --yes --no-swap --ssh-port 22221 $extra"
+"${SSH[@]}" -p 22220 root@127.0.0.1 "bash '$ROOT/vps-init.sh' optimize --yes --strict-ssh --no-swap --ssh-port 22221 $extra"
 pending=(/var/lib/vps-init/*/access.pending)
 [[ ${#pending[@]} == 1 && -f ${pending[0]} ]]
 tx=${pending[0]%/access.pending}; tx=${tx##*/}
@@ -98,7 +98,7 @@ grep -Fq '结果：事务已回滚' "/var/lib/vps-init/$tx/summary.txt"
 printf 'PASS: %s 一键执行、新连接确认、旧端口关闭和恢复旧登录。\n' "$MODE"
 if [[ $IDENTITY == plain ]]; then
     # 第二个事务不确认新入口，缩短测试计时，实际调用独立恢复服务。
-    "${SSH[@]}" -p 22220 root@127.0.0.1 "bash '$ROOT/vps-init.sh' optimize --yes --no-swap --ssh-port 22221"
+    "${SSH[@]}" -p 22220 root@127.0.0.1 "bash '$ROOT/vps-init.sh' optimize --yes --strict-ssh --no-swap --ssh-port 22221"
     pending=(/var/lib/vps-init/*/access.pending)
     [[ ${#pending[@]} == 1 && -f ${pending[0]} ]]
     tx=${pending[0]%/access.pending}; tx=${tx##*/}
@@ -115,3 +115,19 @@ if [[ $IDENTITY == plain ]]; then
     "${SSH[@]}" -p 22220 root@127.0.0.1 true
     printf 'PASS: 无需原 SSH 会话或人工干预的定时恢复。\n'
 fi
+
+# 默认一键流程不要求新会话确认；重复应用与卸载均在原入口直接完成。
+"${SSH[@]}" -p 22220 root@127.0.0.1 "bash '$ROOT/vps-init.sh' optimize --yes --no-swap --ssh-port 22221" > "$TMP/default-output"
+grep -Fq 'SSH 新端口：22221（已生效' "$TMP/default-output"
+if grep -Fq '确认命令' "$TMP/default-output"; then exit 1; fi
+[[ $(wc -l < "$TMP/default-output") -lt 100 ]]
+for marker in /var/lib/vps-init/*/access.pending; do [[ ! -f $marker ]]; done
+"${SSH[@]}" -p 22220 root@127.0.0.1 true
+"${SSH[@]}" -p 22221 root@127.0.0.1 true
+"${SSH[@]}" -p 22220 root@127.0.0.1 "bash '$ROOT/vps-init.sh' optimize --yes --no-swap" > "$TMP/repeat-output"
+"${SSH[@]}" -p 22220 root@127.0.0.1 "bash '$ROOT/vps-init.sh' apply logs --yes"
+"${SSH[@]}" -p 22220 root@127.0.0.1 "bash '$ROOT/vps-init.sh' verify"
+"${SSH[@]}" -p 22220 root@127.0.0.1 "bash '$ROOT/vps-init.sh' uninstall --yes"
+"${SSH[@]}" -p 22220 root@127.0.0.1 true
+[[ ! -e /etc/ssh/vps-init-port ]]
+printf 'PASS: 原 SSH 会话中完成优化、直接摘要、重复运行、独立日志模块及完整卸载。\n'

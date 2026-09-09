@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# VPS 初始化入口；下载完整发行包后运行，禁止在线拼接执行代码。
+# VPS 初始化入口；发行版提供可独立运行的单文件。
 set -Eeuo pipefail
 IFS=$'\n\t'
 umask 077
@@ -14,18 +14,22 @@ source "$BASE/lib/ui.sh"
 
 usage() {
     cat <<'EOF'
-VPS Init 0.2.0-beta.1
+VPS Init 0.3.0-beta.1
 用法：sudo bash vps-init.sh <命令> [选项]
   check                  只读环境检查
   menu                   中文交互菜单（交互终端无参数时默认）
   network                网络、BBR/BBRv3 能力与调优计划检查（只读）
   plan                   一键优化预览（默认）
   optimize               一键优化：适配当前能力，备份后应用全部基础模块
+  apply <模块>           单独安装/重复应用：logs memory cpu network security disk ssh firewall docker fail2ban time
+  uninstall              按逆序恢复所有配置并卸载工具；保留备份和软件包
+  uninstall --keep-config 只卸载工具，保留系统优化配置
   verify                 检查当前实际状态
   confirm-ssh <事务ID>    从新端口登录后确认并关闭旧 SSH 入口
   rollback <事务ID>       恢复指定事务管理的配置及可恢复运行状态
 选项：
-  --yes                  无交互执行；不绕过 SSH 新连接确认
+  --yes                  无交互执行；普通优化直接完成
+  --strict-ssh           可选：新连接验证后关闭旧入口；仅此模式需要确认
   --ssh-port auto|数字    一键优化默认 auto；指定目标 SSH 端口
   --keep-ssh-port         保留现有 SSH 端口
   --allow tcp:80,443      放行额外端口，可多次指定 tcp/udp
@@ -62,6 +66,12 @@ main() {
     if [[ $command == rollback || $command == confirm-ssh ]]; then
         tx=${1:-}; [[ $# == 0 ]] || shift
     fi
+    if [[ $command == apply ]]; then
+        SELECTED_MODULE=${1:-}; [[ $# == 0 ]] || shift
+        case $SELECTED_MODULE in logs|memory|cpu|network|security|disk|ssh|firewall|docker|fail2ban|time) :;; *) die '模块：logs memory cpu network security disk ssh firewall docker fail2ban time';; esac
+        command=optimize
+        case $SELECTED_MODULE in cpu) CPU_PERFORMANCE=1;; docker) DOCKER_LOG=1;; fail2ban) FAIL2BAN=1;; time) ENABLE_NTP=1;; esac
+    fi
     case "$command" in help|--help|-h) usage; return;; esac
     parse_options "$@"
     ui_init
@@ -71,10 +81,11 @@ main() {
         network) network_status;;
         check|plan) report; [[ $command != plan ]] || show_plan;;
         verify) report; verify_managed;;
+        uninstall) uninstall_tool;;
         optimize)
             require_root
             ui_banner
-            show_plan
+            say "即将执行：${SELECTED_MODULE:-all}；完成后直接显示结果。"
             if (( ! YES )); then
                 local answer
                 read -r -p '输入 yes 应用以上计划：' answer
@@ -82,12 +93,29 @@ main() {
             fi
             RUN_STARTED=$SECONDS
             begin_transaction
+            printf '%s\n' "$SELECTED_MODULE" > "$TX/module"
             RUN_ACTION=optimize
             trap 'finish_output "$?"' EXIT
             trap 'on_error "$?" "$LINENO"' ERR
             trap 'die "执行被中断；请查看事务并运行 rollback"' INT TERM
+            MODULE_TOTAL=1
+            [[ $SELECTED_MODULE != all ]] || MODULE_TOTAL=$((7+CPU_PERFORMANCE+DOCKER_LOG+FAIL2BAN))
+            MODULE_TOTAL=$((MODULE_TOTAL+INSTALL))
             run_module 安装工具 "$INSTALL" install_tools
             require_commands
+            apply_modules
+            ;;
+        rollback|confirm-ssh)
+            require_root; require_commands; acquire_lock; load_transaction "$tx"
+            RUN_ACTION=$command
+            trap 'finish_output "$?"' EXIT
+            if [[ $command == rollback ]]; then rollback; else confirm_ssh; fi;;
+        *) usage; die "未知命令：$command";;
+    esac
+}
+apply_modules() {
+    case $SELECTED_MODULE in
+        all)
             run_module 基础维护 1 basic_init
             run_module 日志轮转 1 configure_logs
             run_module 内存与交换空间 1 configure_memory
@@ -97,15 +125,18 @@ main() {
             run_module 磁盘维护 1 configure_storage
             run_module Docker日志 "$DOCKER_LOG" configure_docker
             run_module SSH与防火墙 1 configure_access
-            run_module Fail2ban "$FAIL2BAN" configure_fail2ban
-            report
-            ;;
-        rollback|confirm-ssh)
-            require_root; require_commands; acquire_lock; load_transaction "$tx"
-            RUN_ACTION=$command
-            trap 'finish_output "$?"' EXIT
-            if [[ $command == rollback ]]; then rollback; else confirm_ssh; fi;;
-        *) usage; die "未知命令：$command";;
+            run_module Fail2ban "$FAIL2BAN" configure_fail2ban;;
+        logs) run_module 日志轮转 1 configure_logs;;
+        memory) run_module 内存与交换空间 1 configure_memory;;
+        cpu) run_module CPU调频 1 configure_cpu;;
+        network) run_module TCP/UDP/BBR 1 configure_network;;
+        security) run_module 内核安全 1 configure_security;;
+        disk) run_module 磁盘维护 1 configure_storage;;
+        ssh) run_module SSH与防火墙 1 configure_access;;
+        firewall) run_module 防火墙 1 configure_firewall;;
+        docker) run_module Docker日志 1 configure_docker;;
+        fail2ban) run_module Fail2ban 1 configure_fail2ban;;
+        time) run_module 时间同步 1 basic_init;;
     esac
 }
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then main "$@"; fi

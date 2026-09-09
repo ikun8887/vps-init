@@ -15,6 +15,8 @@ jobs:
         run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT env VPS_INIT_DISPOSABLE_VM=1 bash tests/integration-nft.sh
       - name: 网络档位和默认 FQ 恢复
         run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT env VPS_INIT_DISPOSABLE_VM=1 bash tests/integration-network.sh
+      - name: 单文件安装重装与卸载
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT env VPS_INIT_DISPOSABLE_VM=1 bash tests/integration-install.sh
   access:
     strategy:
       fail-fast: false

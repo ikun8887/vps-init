@@ -1,11 +1,25 @@
 #!/usr/bin/env bash
 install_tools() {
     (( INSTALL )) || { skip '未选择安装工具；使用已有命令'; return; }
+    local commands='flock sysctl' command missing=0
+    local -a packages=()
+    case $SELECTED_MODULE in
+        all) commands+=' ip logrotate sshd nft cmp modprobe'; packages=(logrotate openssh-server nftables diffutils kmod);;
+        logs) commands+=' logrotate'; packages=(logrotate);;
+        ssh) commands+=' sshd ss nft'; packages=(openssh-server nftables);;
+        firewall) commands+=' ss nft'; packages=(nftables);;
+        memory|cpu) commands+=' modprobe'; packages=(kmod);;
+        fail2ban) commands+=' fail2ban-client'; packages=(fail2ban);;
+    esac
+    local -a required=()
+    IFS=' ' read -r -a required <<< "$commands"
+    for command in "${required[@]}"; do has "$command" || missing=1; done
+    if (( ! missing )); then say '依赖已齐全，跳过软件源刷新与重复安装。'; return; fi
     case $DIST in
-        debian|ubuntu) apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y util-linux procps iproute2 logrotate openssh-server nftables diffutils kmod;;
-        rocky|almalinux|rhel|fedora) dnf install -y util-linux procps-ng iproute logrotate openssh-server nftables diffutils kmod;;
-        alpine) apk add coreutils util-linux procps iproute2 logrotate openssh nftables diffutils kmod;;
-        opensuse*|sles) zypper --non-interactive install util-linux procps iproute2 logrotate openssh nftables diffutils kmod;;
+        debian|ubuntu) apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y util-linux procps iproute2 "${packages[@]}";;
+        rocky|almalinux|rhel|fedora) dnf install -y util-linux procps-ng iproute "${packages[@]}";;
+        alpine) packages=("${packages[@]/openssh-server/openssh}"); apk add coreutils util-linux procps iproute2 "${packages[@]}";;
+        opensuse*|sles) packages=("${packages[@]/openssh-server/openssh}"); zypper --non-interactive install util-linux procps iproute2 "${packages[@]}";;
     esac
 }
 basic_init() {

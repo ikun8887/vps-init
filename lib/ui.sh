@@ -15,7 +15,7 @@ ui_banner() {
     say ''
     ui_line '1;36' '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
     ui_line '1;37' '  VPS INIT  ·  初始化与优化控制台'
-    ui_line '36' '  检查 → 预览 → 应用 → 验证 → 恢复'
+    ui_line '36' '  一键优化 · 独立模块 · 重复安装 · 一键卸载'
     ui_line '1;36' '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
     say "  $DIST $VERSION  |  $INIT  |  ${RAM_MB} MiB  |  $VIRT"
 }
@@ -40,18 +40,32 @@ ui_menu_body() {
     ui_section '检查与预览'
     say '  4  系统只读检查             5  网络 / BBRv3 能力检查'
     say '  6  一键优化预览             7  检查已应用配置'
-    ui_section '访问确认与恢复'
+    ui_section '独立安装 / 优化'
+    say ' 12  日志限额与轮转          13  内存 / swap'
+    say ' 14  CPU 调频               15  TCP / UDP / BBR'
+    say ' 16  内核安全               17  磁盘维护'
+    say ' 18  SSH 自动端口           19  防火墙端口放行'
+    say ' 20  Docker 日志限制        21  Fail2ban 防暴力登录'
+    say ' 22  时间同步'
+    ui_section '记录与维护'
     say '  8  事务记录及结果           9  确认 SSH 新入口'
     say ' 10  回滚指定事务            11  查看全部命令参数'
+    ui_line '33' ' 23  卸载并恢复配置          24  只卸载工具 / 保留优化'
     ui_line '36' '  0  退出'
-    say ''; say '修改前会显示计划；新 SSH 入口仍须重新登录确认。'
+    say ''; say '普通优化当场显示结果；新旧 SSH 入口均保留，不需另开会话确认。'
 }
 ui_pause() { local answer; read -r -p '按回车返回菜单…' answer || return 0; }
 ui_exec() {
     local -a color_args=()
     (( ! NO_COLOR_OPTION )) || color_args+=(--no-color)
-    # 使用新进程进入原 CLI，保持其锁、错误退出和恢复逻辑。
-    exec bash "$BASE/vps-init.sh" "$@" "${color_args[@]}"
+    # 子进程自己启用严格错误处理；菜单保留，执行失败也能查看结果并返回。
+    local code
+    set +e
+    bash "$BASE/vps-init.sh" "$@" "${color_args[@]}"
+    code=$?
+    set -e
+    (( ! code )) || ui_line '31' "本次操作退出码：$code"
+    ui_pause
 }
 ui_custom() {
     local value choice
@@ -116,12 +130,13 @@ ui_transactions() {
 }
 ui_menu() {
     [[ -t 0 && -t 1 ]] || die '菜单需要交互终端；自动化请使用 plan/optimize 等 CLI 命令'
-    local choice tx
+    local choice tx module value
     while :; do
+        [[ -f $BASE/vps-init.sh ]] || return 0
         ui_menu_body
         read -r -p '选择操作 [0]：' choice || return 0
         case ${choice:-0} in
-            1) ui_exec optimize --install-tools;;
+            1) ui_exec optimize --yes --install-tools --cpu-performance --enable-ntp --docker-log-limit;;
             2) ui_custom;;
             3) ui_identity;;
             4) report; ui_pause;;
@@ -146,6 +161,18 @@ ui_menu() {
                     [[ $choice != yes ]] || ui_exec rollback "$tx"
                 fi;;
             11) usage; ui_pause;;
+            12|13|14|15|16|17|18|19|20|21|22)
+                case $choice in 12) module=logs;; 13) module=memory;; 14) module=cpu;; 15) module=network;; 16) module=security;; 17) module=disk;; 18) module=ssh;; 19) module=firewall;; 20) module=docker;; 21) module=fail2ban;; 22) module='time';; esac
+                if [[ $module == firewall ]]; then
+                    read -r -p '放行端口（如 tcp:80,443 或 udp:443，回车仅保留现有服务）：' value || return 0
+                    if [[ -n $value ]]; then ui_exec apply firewall --yes --install-tools --allow "$value"
+                    else ui_exec apply firewall --yes --install-tools; fi
+                elif [[ $module == ssh ]]; then
+                    read -r -p '新端口 [auto，首次自动选择 / 已安装则复用]：' value || return 0
+                    ui_exec apply ssh --yes --install-tools --ssh-port "${value:-auto}"
+                else ui_exec apply "$module" --yes --install-tools; fi;;
+            23) ui_exec uninstall;;
+            24) ui_exec uninstall --keep-config;;
             0|q|Q) return 0;;
             *) ui_line '33' '请输入菜单中的编号。';;
         esac

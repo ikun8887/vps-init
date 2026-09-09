@@ -10,11 +10,17 @@ jobs:
       - name: Bash 语法
         run: find . -name '*.sh' -print0 | xargs -0 -n1 bash -n
       - name: ShellCheck
-        run: shellcheck -x vps-init.sh tests/*.sh
+        run: shellcheck -x vps-init.sh install.sh tests/*.sh
       - name: 参数和恢复测试
         run: bash tests/test-core.sh
       - name: 真实终端菜单交互
         run: python3 tests/test-ui.py
+      - name: 单文件发行包
+        run: |
+          python3 scripts/build-release.py /tmp/vps-init-release
+          bash -n /tmp/vps-init-release/vps-init.sh
+          shellcheck /tmp/vps-init-release/vps-init.sh
+          bash /tmp/vps-init-release/vps-init.sh check
       - name: 只读诊断
         run: |
           bash vps-init.sh check

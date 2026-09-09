@@ -38,6 +38,35 @@ firewall_detect() {
         else FW=unknown; fi
     fi
 }
+configure_firewall() {
+    (( ! LIMITED )) || { skip '受限容器不接管防火墙'; return; }
+    firewall_detect
+    [[ $FW != none && $FW != unknown ]] || { skip '未找到可安全管理的防火墙后端'; return; }
+    if [[ $FW == nft ]]; then
+        if [[ $INIT == systemd ]] && { systemctl is-enabled --quiet nftables.service || systemctl is-active --quiet nftables.service; }; then skip '已有 nftables 服务，不接管'; return; fi
+        if [[ $INIT == openrc ]] && rc-service nftables status >/dev/null 2>&1; then skip '已有 nftables 服务，不接管'; return; fi
+        if has iptables-save && iptables-save | grep -q '^-A'; then skip '已有 iptables 规则，不接管'; return; fi
+        if has docker && docker info >/dev/null 2>&1; then skip 'Docker 正在管理网络，不接管'; return; fi
+        if nft list table inet vps_init > "$TX/nft.before" 2>/dev/null; then :; else rm -f "$TX/nft.before"; fi
+    fi
+    local p proto item list
+    local -a ports=() ssh_ports=()
+    has sshd && mapfile -t ssh_ports < <(sshd -T | awk '$1=="port" {print $2}')
+    printf '%s\n' "$FW" > "$TX/firewall.kind"
+    if [[ $FW == nft ]]; then
+        build_nft "${ssh_ports[@]}"
+    else
+        if [[ $FW == ufw ]]; then for p in /etc/ufw/user.rules /etc/ufw/user6.rules; do backup "$p"; done; fi
+        for p in "${ssh_ports[@]}"; do firewall_open tcp "$p"; done
+        for item in "${ALLOW[@]}"; do
+            proto=${item%%:*}; list=${item#*:}; IFS=, read -r -a ports <<< "$list"
+            for p in "${ports[@]}"; do firewall_open "$proto" "$p"; done
+        done
+        if [[ $FW == ufw ]]; then for p in /etc/ufw/user.rules /etc/ufw/user6.rules; do cp -p "$p" "$TX/after$p"; done; fi
+    fi
+    persist_access
+    say '防火墙已处理，未修改 SSH 配置。'
+}
 wait_listener() {
     local port=$1 attempt
     for ((attempt=0; attempt<50; attempt++)); do
@@ -66,7 +95,7 @@ prepare_recovery() {
     # 恢复任务独立于 SSH 会话；复制当前工具，避免用户移动源码后无法回滚。
     mkdir -p "$TX/tool/lib"
     cp "$BASE/vps-init.sh" "$TX/tool/"
-    cp "$BASE"/lib/*.sh "$TX/tool/lib/"
+    if [[ -d $BASE/lib ]]; then cp "$BASE"/lib/*.sh "$TX/tool/lib/"; fi
     if [[ $INIT == openrc ]]; then
         local result job
         result=$(printf '/bin/bash %s/tool/vps-init.sh rollback %s >>%s/recovery.log 2>&1\n' "$TX" "$TXID" "$TX" | env -i PATH="$PATH" HOME=/root LC_ALL=C at now + 5 minutes 2>&1) || die 'at 恢复任务创建失败'
@@ -161,9 +190,9 @@ configure_access() {
     elif [[ -f /etc/ssh/vps-init-port ]]; then
         target=$(cat /etc/ssh/vps-init-port)
         port_valid "$target" || die '已管理 SSH 端口记录损坏'
-        if [[ $SSH_PORT != auto && $SSH_PORT != "$target" ]]; then die '已有管理端口；请先回滚之前的端口事务'; fi
-        say "保留本工具已管理端口 $target"
-        if [[ -z $ADMIN_USER ]]; then
+        if [[ $SSH_PORT != auto && $SSH_PORT != "$target" ]]; then target=$SSH_PORT
+        elif [[ -z $ADMIN_USER ]] && (( ! STRICT_SSH && ${#ALLOW[@]} == 0 )) &&
+            printf '%s\n' "${old_ports[@]}" | grep -Fxq "$target" && wait_listener "$target"; then
             skip '访问配置已管理，本次不重建防火墙或重新随机端口'
             return
         fi
@@ -236,11 +265,36 @@ configure_access() {
         systemctl start "$service.service"
     else service_reload "$service"; fi
     wait_listener "$target" || die '新端口未监听，将由恢复任务还原'
+    if (( ! STRICT_SSH )); then
+        # 默认保留所有旧入口；仅在语法、监听和持久化成功后取消恢复任务。
+        for p in "${old_ports[@]}"; do wait_listener "$p" || die '旧 SSH 入口未监听，保留恢复任务'; done
+        persist_access
+        write_file /etc/ssh/vps-init-port <<< "$target"
+        touch "$TX/access.ready"
+        stop_recovery
+        say "SSH $target 已生效，旧入口保留；本次已完成。"
+        return
+    fi
     say "[待确认] 请在 5 分钟内从新端口 $target 重新 SSH 登录，然后执行："
     say "sudo bash $BASE/vps-init.sh confirm-ssh $TXID"
     say '云安全组/NAT 未放行时保留当前会话；超时恢复整个配置事务。'
     if [[ -n $ADMIN_USER ]]; then
         say "请以 $ADMIN_USER 使用刚提供的公钥登录，并用 sudo --preserve-env=SSH_CONNECTION,SSH_USER_AUTH 执行确认。"
+    fi
+}
+persist_access() {
+    if [[ $FW == nft ]]; then
+        nft list table inet vps_init > "$TX/nft.after"
+        write_file /etc/nftables-vps-init.conf < "$TX/nft.after"
+        install_firewall_persistence
+    elif [[ $FW == firewalld && -f $TX/firewalld.added ]]; then
+        local proto p
+        while IFS=$'\t' read -r proto p; do
+            if ! firewall-cmd --permanent --query-port="$p/$proto" >/dev/null; then
+                printf '%s\t%s\n' "$proto" "$p" >> "$TX/firewalld.permanent-added"
+                firewall-cmd --permanent --add-port="$p/$proto"
+            fi
+        done < "$TX/firewalld.added"
     fi
 }
 prepare_identity() {
@@ -308,6 +362,20 @@ socket_port_only() {
 build_nft() {
     local -a ports=("$@")
     local p item proto list
+    if nft list table inet vps_init > "$TX/nft.current" 2>/dev/null; then
+        : > "$TX/nft.new"
+        for p in "${ports[@]}"; do nft_append_port tcp "$p"; done
+        for item in "${ALLOW[@]}"; do
+            proto=${item%%:*}; list=${item#*:}
+            local -a extra=()
+            IFS=, read -r -a extra <<< "$list"
+            for p in "${extra[@]}"; do nft_append_port "$proto" "$p"; done
+        done
+        nft --check -f "$TX/nft.new"
+        nft -f "$TX/nft.new"
+        nft list table inet vps_init > "$TX/nft.after"
+        return
+    fi
     {
         if nft list table inet vps_init >/dev/null 2>&1; then printf 'delete table inet vps_init\n'; fi
         printf 'table inet vps_init {\n chain input {\n type filter hook input priority 0; policy drop;\n'
@@ -325,13 +393,22 @@ build_nft() {
         done < <(ss -H -lntu | awk '$1=="tcp" || $1=="udp" {print $1 " " $5}')
         for item in "${ALLOW[@]}"; do
             proto=${item%%:*}; list=${item#*:}
-            printf '%s dport { %s } accept\n' "$proto" "$list"
+            local -a extra=()
+            IFS=, read -r -a extra <<< "$list"
+            for p in "${extra[@]}"; do printf '%s dport %s accept\n' "$proto" "$p"; done
         done
         printf '}\n}\n'
     } > "$TX/nft.new"
     nft --check -f "$TX/nft.new"
     nft -f "$TX/nft.new"
     nft list table inet vps_init > "$TX/nft.after"
+}
+nft_append_port() {
+    local proto=$1 p=$2
+    port_valid "$p" || die '无效防火墙端口'
+    if ! grep -Eq "(^|[[:space:]])$proto dport $p accept([[:space:];]|$)" "$TX/nft.current" "$TX/nft.new"; then
+        printf 'add rule inet vps_init input %s dport %s accept\n' "$proto" "$p" >> "$TX/nft.new"
+    fi
 }
 confirm_ssh() {
     [[ -f $TX/access.pending ]] || die '该事务无待确认 SSH 变更'
