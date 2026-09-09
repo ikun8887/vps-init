@@ -12,7 +12,8 @@ for name in ("core", "modules", "access", "ui"):
     source = source.replace(f'source "$BASE/lib/{name}.sh"', library)
 payload = source.encode("utf-8")
 (destination / "vps-init.sh").write_bytes(payload)
-(destination / "SHA256SUMS").write_text(
-    f"{hashlib.sha256(payload).hexdigest()}  vps-init.sh\n", encoding="ascii"
+# write_bytes 避免 Windows 将 LF 自动转换为 CRLF，保持跨平台可复现。
+(destination / "SHA256SUMS").write_bytes(
+    f"{hashlib.sha256(payload).hexdigest()}  vps-init.sh\n".encode("ascii")
 )
 print(f"单文件发行包：{len(payload):,} 字节 → {destination}")
