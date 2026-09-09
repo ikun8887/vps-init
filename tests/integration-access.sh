@@ -12,7 +12,12 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MODE=${1:-service}
 IDENTITY=${2:-plain}
 TMP=$(mktemp -d)
-trap 'rm -rf -- "$TMP"' EXIT
+cleanup() {
+    local code=$? output
+    if (( code )); then for output in "$TMP"/*-output; do [[ ! -f $output ]] || cat "$output"; done; fi
+    rm -rf -- "$TMP"
+}
+trap cleanup EXIT
 ssh-keygen -q -t ed25519 -N '' -f "$TMP/key"
 mkdir -p /root/.ssh
 chmod 700 /root/.ssh
@@ -117,15 +122,23 @@ if [[ $IDENTITY == plain ]]; then
 fi
 
 # 默认一键流程不要求新会话确认；重复应用与卸载均在原入口直接完成。
+"${SSH[@]}" -p 22220 root@127.0.0.1 "bash '$ROOT/vps-init.sh' apply ssh --yes --strict-ssh --ssh-port 22221"
+"${SSH[@]}" -p 22220 root@127.0.0.1 "bash '$ROOT/vps-init.sh' apply logs --yes" > "$TMP/recovery-output"
+grep -Fq '[修复] 恢复上次未完成的 SSH 操作' "$TMP/recovery-output"
+for marker in /var/lib/vps-init/*/access.pending; do [[ ! -f $marker ]]; done
+"${SSH[@]}" -p 22220 root@127.0.0.1 true
 "${SSH[@]}" -p 22220 root@127.0.0.1 "bash '$ROOT/vps-init.sh' optimize --yes --no-swap --ssh-port 22221" > "$TMP/default-output"
 grep -Fq 'SSH 新端口：22221（已生效' "$TMP/default-output"
-if grep -Fq '确认命令' "$TMP/default-output"; then exit 1; fi
+if grep -q '^确认命令（' "$TMP/default-output"; then exit 1; fi
 [[ $(wc -l < "$TMP/default-output") -lt 100 ]]
 for marker in /var/lib/vps-init/*/access.pending; do [[ ! -f $marker ]]; done
 "${SSH[@]}" -p 22220 root@127.0.0.1 true
 "${SSH[@]}" -p 22221 root@127.0.0.1 true
 "${SSH[@]}" -p 22220 root@127.0.0.1 "bash '$ROOT/vps-init.sh' optimize --yes --no-swap" > "$TMP/repeat-output"
 "${SSH[@]}" -p 22220 root@127.0.0.1 "bash '$ROOT/vps-init.sh' apply logs --yes"
+cp /etc/ssh/sshd_config "$TMP/ssh-before-firewall"
+"${SSH[@]}" -p 22220 root@127.0.0.1 "bash '$ROOT/vps-init.sh' apply firewall --yes --allow tcp:33333"
+cmp /etc/ssh/sshd_config "$TMP/ssh-before-firewall"
 "${SSH[@]}" -p 22220 root@127.0.0.1 "bash '$ROOT/vps-init.sh' verify"
 "${SSH[@]}" -p 22220 root@127.0.0.1 "bash '$ROOT/vps-init.sh' uninstall --yes"
 "${SSH[@]}" -p 22220 root@127.0.0.1 true

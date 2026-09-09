@@ -306,7 +306,11 @@ uninstall_tool() {
         rmdir /usr/local/lib/vps-init 2>/dev/null || say '安装目录含其他文件，已保留。'
     fi
     say "卸载完成：恢复 $count 次操作；备份保留在 $STATE。软件包、用户及业务数据保留。"
-    if has sshd; then sshd -T | awk '$1=="port" {print "当前 SSH 端口：" $2}'; fi
+    if has sshd; then
+        local effective
+        if effective=$(sshd -T 2>/dev/null); then awk '$1=="port" {print "当前 SSH 端口：" $2}' <<< "$effective"
+        else say '当前 SSH 端口：无法读取（服务可能未初始化），工具卸载已完成。'; fi
+    fi
 }
 load_transaction() {
     [[ $1 =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]] || die '无效事务 ID'
