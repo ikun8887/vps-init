@@ -2,18 +2,18 @@
 
 中文 Linux VPS 初始化工具：**一键优化、自动 SSH 端口、配置备份与回滚**。核心逻辑自行实现，不下载执行第三方脚本。
 
-当前版本 **v0.1.0-beta.1**。已通过静态检查、10 种发行版容器基础检查，以及 Ubuntu 临时虚拟机的真实 SSH、UFW、swap 和 nftables 测试。它不是“所有 Linux 版本均已认证”的承诺；具体能力及未验证环境见下文。
+当前版本 **v0.1.0-beta.2**。已通过静态检查、10 种发行版容器基础检查，以及 Ubuntu 临时虚拟机的真实 SSH、UFW、swap 和 nftables 测试。它不是“所有 Linux 版本均已认证”的承诺；具体能力及未验证环境见下文。
 
 ## 下载与一键优化
 
 在 VPS 上下载完整发行包（入口依赖同目录的 `lib/`），先核对校验值：
 
 ```bash
-curl -fLO https://github.com/ikun8887/vps-init/releases/download/v0.1.0-beta.1/vps-init-v0.1.0-beta.1.tar.gz
-curl -fLO https://github.com/ikun8887/vps-init/releases/download/v0.1.0-beta.1/SHA256SUMS
+curl -fLO https://github.com/ikun8887/vps-init/releases/download/v0.1.0-beta.2/vps-init-v0.1.0-beta.2.tar.gz
+curl -fLO https://github.com/ikun8887/vps-init/releases/download/v0.1.0-beta.2/SHA256SUMS
 sha256sum -c SHA256SUMS
-tar -xzf vps-init-v0.1.0-beta.1.tar.gz
-cd vps-init-v0.1.0-beta.1
+tar -xzf vps-init-v0.1.0-beta.2.tar.gz
+cd vps-init-v0.1.0-beta.2
 
 bash vps-init.sh check
 bash vps-init.sh plan
@@ -39,6 +39,24 @@ sudo bash vps-init.sh optimize --yes --keep-ssh-port --no-swap
 `--keep-ssh-port` 仍会处理适用的防火墙，并可能要求访问确认；它不是“跳过访问模块”。
 
 ## 功能与默认行为
+
+运行结束会集中输出结果摘要，并写入 `/var/lib/vps-init/<事务ID>/summary.txt`。例如：
+
+```text
+========== VPS Init 运行结果 ==========
+结果：配置流程已结束；SSH 仍待新连接确认。
+事务 ID：20260909T000000Z-1234
+  日志轮转：已处理
+  CPU调频：未启用
+SSH 原端口：22
+SSH 目标端口：22222（待确认；旧入口暂时保留）
+SSH 当前配置端口：22222,22
+目标 TCP 端口 22222：正在监听（公网连通性仍需登录验证）
+本次防火墙后端：ufw
+TCP 当前拥塞算法：bbr
+```
+
+实际摘要还包含跳过原因、swap 状态、备份位置、新连接示例、确认及回滚命令。端口和状态以实际执行为准；未迁移、执行失败、确认成功、已经回滚会分别显示，失败仍返回非零退出码。确认及回滚后会更新同一份摘要。操作前的参数/权限检查失败或无法创建事务时，只有错误提示，不会虚构事务结果。
 
 | 模块 | 一键默认行为 | 可选项及边界 |
 | --- | --- | --- |

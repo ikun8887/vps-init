@@ -5,8 +5,102 @@ FAIL2BAN=0
 ADMIN_USER='' PUBLIC_KEY='' DISABLE_PASSWORD=0 DISABLE_ROOT=0
 STATE=/var/lib/vps-init
 declare -a ALLOW=()
+CURRENT_MODULE='' MODULE_SKIP_COUNT=0 RUN_ACTION=''
 say() { printf '%s\n' "$*"; }
-skip() { say "[跳过] $*"; }
+skip() {
+    say "[跳过] $*"
+    if [[ -n $CURRENT_MODULE ]]; then
+        MODULE_SKIP_COUNT=$((MODULE_SKIP_COUNT+1))
+        printf '%s：%s\n' "$CURRENT_MODULE" "$*" >> "$TX/skipped.txt"
+    fi
+}
+run_module() {
+    local label=$1 enabled=$2
+    shift 2
+    if (( ! enabled )); then printf '%s\t未启用\n' "$label" >> "$TX/results.tsv"; return; fi
+    CURRENT_MODULE=$label MODULE_SKIP_COUNT=0
+    # 不放入 if/|| 条件，避免 Bash 关闭被调用函数内部的 errexit。
+    "$@"
+    local status=已处理
+    (( ! MODULE_SKIP_COUNT )) || status='已处理（有跳过项）'
+    printf '%s\t%s\n' "$label" "$status" >> "$TX/results.tsv"
+    CURRENT_MODULE=''
+}
+render_summary() {
+    local code=$1 label status target='' old='' current='' user_name
+    say ''; say '========== VPS Init 运行结果 =========='
+    if (( code )); then say "结果：执行失败（退出码 $code），未完成的步骤不可视为成功。"
+    elif [[ -f $TX/rolled-back ]]; then say '结果：事务已回滚。'
+    elif [[ -f $TX/access.pending ]]; then say '结果：配置流程已结束；SSH 仍待新连接确认。'
+    elif [[ $RUN_ACTION == confirm-ssh ]]; then say '结果：SSH 新入口已确认。'
+    else say '结果：配置流程已结束。'; fi
+    say "事务 ID：$TXID"
+    if [[ $RUN_ACTION == optimize ]]; then
+        if [[ -f $TX/results.tsv ]]; then
+            while IFS=$'\t' read -r label status; do say "  $label：$status"; done < "$TX/results.tsv"
+        fi
+        [[ -z $CURRENT_MODULE ]] || say "  $CURRENT_MODULE：失败或中断"
+        say '“已处理”表示模块流程返回，不代表每项参数均修改或性能必然提升。'
+        if [[ -s $TX/skipped.txt ]]; then say '跳过原因：'; cat "$TX/skipped.txt"; fi
+    fi
+    [[ ! -f $TX/ssh.target ]] || target=$(cat "$TX/ssh.target")
+    [[ ! -f $TX/ssh.oldports ]] || old=$(awk '{printf "%s%s",sep,$0;sep=","}' "$TX/ssh.oldports")
+    [[ -z $old ]] || say "SSH 原端口：$old"
+    if [[ -f $TX/access.pending ]]; then
+        say "SSH 目标端口：$target（待确认；旧入口暂时保留）"
+    elif [[ -f $TX/rolled-back && -n $target ]]; then
+        say "SSH 本次目标端口：$target（已回滚，以当前配置为准）"
+    elif [[ -f $TX/access.confirmed ]]; then say "SSH 已确认端口：$target"
+    else say 'SSH：本次未完成新的端口迁移，保留现有配置。'; fi
+    if has sshd; then
+        if current=$(sshd -T 2>/dev/null); then
+            current=$(printf '%s\n' "$current" | awk '$1=="port" {printf "%s%s",sep,$2;sep=","}')
+            say "SSH 当前配置端口：${current:-未能读取}"
+        else say 'SSH 当前配置端口：读取失败，请检查 sshd 配置。'; fi
+    else say 'SSH 当前配置端口：未安装 sshd，无法读取。'; fi
+    if [[ -n $target ]] && port_valid "$target" && has ss; then
+        if current=$(ss -H -ltn "sport = :$target" 2>/dev/null); then
+            if [[ -n $current ]]; then say "目标 TCP 端口 $target：正在监听（公网连通性仍需登录验证）"
+            else say "目标 TCP 端口 $target：未监听"; fi
+        else say '目标端口监听状态：无法读取'; fi
+    fi
+    if [[ -f $TX/firewall.kind ]]; then say "本次防火墙后端：$(cat "$TX/firewall.kind")"; fi
+    if has sysctl && current=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null); then
+        say "TCP 当前拥塞算法：$current"
+    fi
+    if [[ -r /proc/swaps ]]; then
+        current=$(awk 'NR>1 {total+=$3;used+=$4} END {printf "总量 %.0f MiB，已用 %.0f MiB",total/1024,used/1024}' /proc/swaps)
+        say "当前 swap：$current"
+    fi
+    if [[ -f $TX/manifest ]]; then say "本事务备份配置数：$(awk 'END {print NR+0}' "$TX/manifest")"; fi
+    if [[ -f $TX/access.pending ]]; then
+        user_name=${SUDO_USER:-root}
+        [[ ! -f $TX/identity.user ]] || user_name=$(cat "$TX/identity.user")
+        say "新连接示例：ssh -p $target $user_name@你的服务器IP"
+        say '确认命令（在新端口的新会话中执行）：'
+        if [[ -f $TX/identity.user ]]; then
+            printf 'sudo --preserve-env=SSH_CONNECTION,SSH_USER_AUTH bash %q confirm-ssh %q\n' "$BASE/vps-init.sh" "$TXID"
+        else printf 'sudo --preserve-env=SSH_CONNECTION bash %q confirm-ssh %q\n' "$BASE/vps-init.sh" "$TXID"; fi
+        say '恢复任务从访问迁移开始计时 5 分钟，剩余时间可能不足 5 分钟；请立即验证。'
+        say '请保留原会话，并在云安全组/NAT 中放行目标端口。'
+    fi
+    say "备份和日志：$TX"
+    say "结果文件：$TX/summary.txt"
+    if [[ ! -f $TX/rolled-back ]]; then
+        printf '回滚命令：sudo bash %q rollback %q\n' "$BASE/vps-init.sh" "$TXID"
+    fi
+    say '======================================'
+}
+finish_output() {
+    local code=$1
+    trap - ERR EXIT
+    set +e
+    # 摘要独立保存，即使 run.log 已达容量上限仍可查看；保留原执行退出码。
+    render_summary "$code" > "$TX/summary.txt"
+    if [[ $? == 0 ]]; then cat "$TX/summary.txt"
+    else say "[错误] 无法完整保存运行摘要：$TX/summary.txt" >&2; fi
+    exit "$code"
+}
 die() { say "[错误] $*" >&2; exit 1; }
 has() { command -v "$1" >/dev/null 2>&1; }
 uint() { [[ $1 =~ ^[0-9]+$ && ${#1} -le 8 ]]; }

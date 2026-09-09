@@ -13,7 +13,7 @@ source "$BASE/lib/access.sh"
 
 usage() {
     cat <<'EOF'
-VPS Init 0.1.0-beta.1
+VPS Init 0.1.0-beta.2
 用法：sudo bash vps-init.sh <命令> [选项]
   check                  只读环境检查
   plan                   一键优化预览（默认）
@@ -64,27 +64,29 @@ main() {
                 [[ $answer == yes ]] || die '已取消'
             fi
             begin_transaction
+            RUN_ACTION=optimize
+            trap 'finish_output "$?"' EXIT
             trap 'on_error "$?" "$LINENO"' ERR
             trap 'die "执行被中断；请查看事务并运行 rollback"' INT TERM
-            install_tools
+            run_module 安装工具 "$INSTALL" install_tools
             require_commands
-            basic_init
-            configure_logs
-            configure_memory
-            configure_cpu
-            configure_network
-            configure_security
-            configure_storage
-            configure_docker
-            configure_access
-            configure_fail2ban
+            run_module 基础维护 1 basic_init
+            run_module 日志轮转 1 configure_logs
+            run_module 内存与交换空间 1 configure_memory
+            run_module CPU调频 "$CPU_PERFORMANCE" configure_cpu
+            run_module TCP/UDP/BBR 1 configure_network
+            run_module 内核安全 1 configure_security
+            run_module 磁盘维护 1 configure_storage
+            run_module Docker日志 "$DOCKER_LOG" configure_docker
+            run_module SSH与防火墙 1 configure_access
+            run_module Fail2ban "$FAIL2BAN" configure_fail2ban
             report
-            say "完成配置事务：$TXID；备份：$TX"
-            say "恢复命令：sudo bash $BASE/vps-init.sh rollback $TXID"
-            say '跳过项及待验证项不计为优化成功；性能收益需在相同负载下测量。'
             ;;
-        rollback) require_root; require_commands; acquire_lock; load_transaction "$tx"; rollback;;
-        confirm-ssh) require_root; require_commands; acquire_lock; load_transaction "$tx"; confirm_ssh;;
+        rollback|confirm-ssh)
+            require_root; require_commands; acquire_lock; load_transaction "$tx"
+            RUN_ACTION=$command
+            trap 'finish_output "$?"' EXIT
+            if [[ $command == rollback ]]; then rollback; else confirm_ssh; fi;;
         *) usage; die "未知命令：$command";;
     esac
 }

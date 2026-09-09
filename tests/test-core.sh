@@ -99,4 +99,49 @@ if (assert_simple_auth_policy "$policy") >/dev/null 2>&1; then exit 1; fi
 printf 'Include %s/sshd-policy\n' "$WORK" > "$WORK/child-policy"
 if (assert_simple_auth_policy "$policy") >/dev/null 2>&1; then exit 1; fi
 ok '全局加固拒绝 Match、递归 Include 覆盖和循环'
+
+TX="$WORK/summary-tx" TXID=20260909T000000Z-1234 RUN_ACTION=optimize
+mkdir "$TX"
+# shellcheck disable=SC2329 # run_module 按参数间接调用
+test_skipped_module() { skip '没有可写接口'; }
+run_module CPU 1 test_skipped_module
+run_module Docker 0 test_skipped_module
+printf '22222\n' > "$TX/ssh.target"
+printf '22\n' > "$TX/ssh.oldports"
+touch "$TX/access.pending"
+sshd() { printf 'port 22\nport 22222\n'; }
+ss() { printf 'LISTEN\n'; }
+render_summary 0 > "$WORK/summary"
+grep -Fq 'SSH 目标端口：22222（待确认' "$WORK/summary"
+grep -Fq 'SSH 原端口：22' "$WORK/summary"
+grep -Fq 'SSH 当前配置端口：22,22222' "$WORK/summary"
+grep -Fq 'CPU：已处理（有跳过项）' "$WORK/summary"
+grep -Fq 'Docker：未启用' "$WORK/summary"
+grep -Fq -- '--preserve-env=SSH_CONNECTION bash' "$WORK/summary"
+printf 'vpsadmin\n' > "$TX/identity.user"
+render_summary 0 > "$WORK/summary"
+grep -Fq -- '--preserve-env=SSH_CONNECTION,SSH_USER_AUTH bash' "$WORK/summary"
+rm "$TX/access.pending"
+touch "$TX/rolled-back"
+render_summary 0 > "$WORK/summary"
+grep -Fq '结果：事务已回滚' "$WORK/summary"
+if grep -Fq '确认命令' "$WORK/summary"; then exit 1; fi
+unset -f sshd ss test_skipped_module
+ok '结束摘要显示端口、跳过项、公钥确认及回滚状态'
+
+# 在独立 Bash 中验证包装器不屏蔽失败，且 EXIT 摘要保留原退出码。
+if bash -s -- "$ROOT" "$WORK" > "$WORK/failure-output" 2>&1 <<'EOF'
+source "$1/vps-init.sh"
+TX="$2/failure-tx" TXID=20260909T000000Z-5678 RUN_ACTION=optimize
+mkdir "$TX"
+trap 'finish_output "$?"' EXIT
+failing_module() { false; touch "$TX/incorrectly-continued"; }
+run_module 失败模块 1 failing_module
+EOF
+then exit 1
+else [[ $? == 1 ]]; fi
+[[ ! -e $WORK/failure-tx/incorrectly-continued ]]
+grep -Fq '执行失败（退出码 1）' "$WORK/failure-tx/summary.txt"
+grep -Fq '失败模块：失败或中断' "$WORK/failure-tx/summary.txt"
+ok '失败模块立即终止并保存失败摘要，退出码保持不变'
 printf '%s checks passed\n' "$passed"

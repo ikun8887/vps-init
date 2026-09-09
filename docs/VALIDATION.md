@@ -20,6 +20,8 @@
 
 ## 可复现命令
 
+beta.2 新增结束摘要回归：检查新旧端口、跳过/未启用状态、公钥确认命令和回滚状态；独立 Bash 验证模块失败仍立即终止且保存非零退出码。SSH 临时 VM 集成同时检查实际执行、确认和回滚后的 `summary.txt`。
+
 ```bash
 find . -name '*.sh' -print0 | xargs -0 -n1 bash -n
 shellcheck -x vps-init.sh tests/*.sh

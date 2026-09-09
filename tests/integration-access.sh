@@ -75,9 +75,13 @@ fi
 pending=(/var/lib/vps-init/*/access.pending)
 [[ ${#pending[@]} == 1 && -f ${pending[0]} ]]
 tx=${pending[0]%/access.pending}; tx=${tx##*/}
+grep -Fq 'SSH 原端口：22220' "/var/lib/vps-init/$tx/summary.txt"
+grep -Fq 'SSH 目标端口：22221（待确认' "/var/lib/vps-init/$tx/summary.txt"
+grep -Fq '目标 TCP 端口 22221：正在监听' "/var/lib/vps-init/$tx/summary.txt"
 login=root prefix=''
 if [[ $IDENTITY == identity ]]; then login=vpscheck; prefix='sudo --preserve-env=SSH_CONNECTION,SSH_USER_AUTH'; fi
 "${SSH[@]}" -p 22221 "$login@127.0.0.1" "$prefix bash '$ROOT/vps-init.sh' confirm-ssh '$tx'"
+grep -Fq 'SSH 已确认端口：22221' "/var/lib/vps-init/$tx/summary.txt"
 "${SSH[@]}" -p 22221 "$login@127.0.0.1" "$prefix bash '$ROOT/vps-init.sh' verify"
 if [[ $IDENTITY == identity ]] && "${SSH[@]}" -p 22221 root@127.0.0.1 true; then
     printf '加固后 root 仍可登录\n' >&2
@@ -90,6 +94,7 @@ fi
 "${SSH[@]}" -p 22221 "$login@127.0.0.1" "$prefix bash '$ROOT/vps-init.sh' rollback '$tx'"
 "${SSH[@]}" -p 22220 root@127.0.0.1 true
 [[ ! -e /etc/ssh/vps-init-port && -f /var/lib/vps-init/$tx/rolled-back ]]
+grep -Fq '结果：事务已回滚' "/var/lib/vps-init/$tx/summary.txt"
 printf 'PASS: %s 一键执行、新连接确认、旧端口关闭和恢复旧登录。\n' "$MODE"
 if [[ $IDENTITY == plain ]]; then
     # 第二个事务不确认新入口，缩短测试计时，实际调用独立恢复服务。
