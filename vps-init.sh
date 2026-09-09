@@ -10,12 +10,15 @@ BASE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$BASE/lib/core.sh"
 source "$BASE/lib/modules.sh"
 source "$BASE/lib/access.sh"
+source "$BASE/lib/ui.sh"
 
 usage() {
     cat <<'EOF'
-VPS Init 0.1.0-beta.2
+VPS Init 0.2.0-beta.1
 用法：sudo bash vps-init.sh <命令> [选项]
   check                  只读环境检查
+  menu                   中文交互菜单（交互终端无参数时默认）
+  network                网络、BBR/BBRv3 能力与调优计划检查（只读）
   plan                   一键优化预览（默认）
   optimize               一键优化：适配当前能力，备份后应用全部基础模块
   verify                 检查当前实际状态
@@ -40,29 +43,44 @@ VPS Init 0.1.0-beta.2
   --disable-root-login    新管理员通过公钥验证后，关闭全局 root 登录
   --hostname 名称         设置主机名（需 hostnamectl）
   --timezone 时区         设置时区（需 timedatectl）
+  --network-profile 档位  conservative / balanced（默认）/ throughput
+  --bandwidth-mbps 数字   throughput 档位的人工带宽输入：1–100000 Mbps
+  --rtt-ms 数字           throughput 档位的业务 RTT：1–2000 ms
+  --keep-bbr              保留当前拥塞算法，只调整网络缓冲
+  --default-fq            仅设置后续队列默认 fq，不替换当前 tc 树
+  --enable-ntp            启用 timedatectl 可管理的已安装时间同步服务
+  --no-color              禁用终端配色，也支持 NO_COLOR 环境变量
 EOF
 }
 
 main() {
-    local command=${1:-plan} tx=''
+    local command=${1:-} tx=''
+    if [[ -z $command ]]; then
+        if [[ -t 0 && -t 1 ]]; then command=menu; else command=plan; fi
+    fi
     [[ $# == 0 ]] || shift
     if [[ $command == rollback || $command == confirm-ssh ]]; then
         tx=${1:-}; [[ $# == 0 ]] || shift
     fi
     case "$command" in help|--help|-h) usage; return;; esac
     parse_options "$@"
+    ui_init
     detect
     case "$command" in
+        menu) ui_menu;;
+        network) network_status;;
         check|plan) report; [[ $command != plan ]] || show_plan;;
         verify) report; verify_managed;;
         optimize)
             require_root
+            ui_banner
             show_plan
             if (( ! YES )); then
                 local answer
                 read -r -p '输入 yes 应用以上计划：' answer
                 [[ $answer == yes ]] || die '已取消'
             fi
+            RUN_STARTED=$SECONDS
             begin_transaction
             RUN_ACTION=optimize
             trap 'finish_output "$?"' EXIT

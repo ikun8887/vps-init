@@ -2,18 +2,20 @@
 
 中文 Linux VPS 初始化工具：**一键优化、自动 SSH 端口、配置备份与回滚**。核心逻辑自行实现，不下载执行第三方脚本。
 
-当前版本 **v0.1.0-beta.2**。已通过静态检查、10 种发行版容器基础检查，以及 Ubuntu 临时虚拟机的真实 SSH、UFW、swap 和 nftables 测试。它不是“所有 Linux 版本均已认证”的承诺；具体能力及未验证环境见下文。
+当前版本 **v0.2.0-beta.1**。已通过静态检查、10 种发行版容器基础检查，以及 Ubuntu 临时虚拟机的真实 SSH、UFW、swap 和 nftables 测试。它不是“所有 Linux 版本均已认证”的承诺；具体能力及未验证环境见下文。
 
 ## 下载与一键优化
+
+完整源码解压后运行 `sudo bash vps-init.sh` 可进入中文菜单，选择 **1** 一键优化；选择 **2** 自定义网络/SSH/swap，选择 **3** 配置公钥管理员。菜单也提供只读检查、历史结果、确认与回滚。无交互终端时不弹菜单，避免阻塞自动化任务。禁用配色：`sudo bash vps-init.sh menu --no-color`，或设置 `NO_COLOR=1`。
 
 在 VPS 上下载完整发行包（入口依赖同目录的 `lib/`），先核对校验值：
 
 ```bash
-curl -fLO https://github.com/ikun8887/vps-init/releases/download/v0.1.0-beta.2/vps-init-v0.1.0-beta.2.tar.gz
-curl -fLO https://github.com/ikun8887/vps-init/releases/download/v0.1.0-beta.2/SHA256SUMS
+curl -fLO https://github.com/ikun8887/vps-init/releases/download/v0.2.0-beta.1/vps-init-v0.2.0-beta.1.tar.gz
+curl -fLO https://github.com/ikun8887/vps-init/releases/download/v0.2.0-beta.1/SHA256SUMS
 sha256sum -c SHA256SUMS
-tar -xzf vps-init-v0.1.0-beta.2.tar.gz
-cd vps-init-v0.1.0-beta.2
+tar -xzf vps-init-v0.2.0-beta.1.tar.gz
+cd vps-init-v0.2.0-beta.1
 
 bash vps-init.sh check
 bash vps-init.sh plan
@@ -121,6 +123,30 @@ sudo bash /实际解压路径/vps-init.sh rollback 实际事务ID
 重复运行会保留已有 swap 和已确认 SSH 端口；已有访问事务待确认时拒绝启动下一次优化。`plan` 是模块级预览，尚不提供逐文件差异；`verify` 检查已管理 sysctl 和 SSH 状态，不替代公网连通及重启测试。
 
 ## 可选命令
+
+```bash
+# BBR / BBRv3 内核能力、当前队列与网络参数：只读，不测速
+bash vps-init.sh network
+
+# 小内存保守档
+sudo bash vps-init.sh optimize --network-profile conservative
+
+# 按人工带宽和主要业务 RTT 计算缓冲目标
+sudo bash vps-init.sh optimize --network-profile throughput --bandwidth-mbps 1000 --rtt-ms 150
+
+# 明确保留当前拥塞算法；不把第三方 BBR 变体静默切换成 bbr
+sudo bash vps-init.sh optimize --keep-bbr
+
+# 仅改变后续队列默认 FQ；当前 tc 树不变
+sudo bash vps-init.sh optimize --default-fq
+
+# 使用已经安装且可由 timedatectl 管理的时间同步服务
+sudo bash vps-init.sh optimize --enable-ntp
+```
+
+档位 `balanced` 为默认，基础目标按 RAM 为 4/8/16 MiB；`conservative` 为该目标的一半；`throughput` 为 `Mbps × RTT毫秒 × 250` 字节。三档目标均受 `max(1 MiB, min(RAM/32, 128 MiB))` 预算限制，已有更大值不降低。throughput 必须提供两项输入，它们不是测速结果，也不代表所有业务路径的实际带宽/RTT。
+
+**BBRv3 需要内核本身支持，本工具不安装第三方内核。** 当前可信内核若提供标准 `bbr` 接口即可使用，但不能仅凭名称证明 v3。新的菜单与网络逻辑参考了四个项目，实际采用范围见 [参考项目复核](docs/REFERENCE-REVIEW.md)。
 
 ```bash
 sudo bash vps-init.sh optimize --swap-mb 1024

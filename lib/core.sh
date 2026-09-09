@@ -2,6 +2,8 @@
 YES=0 KEEP_SSH=0 SSH_PORT=auto SWAP_MB=auto NO_SWAP=0 INSTALL=0 UPDATES=0
 CPU_PERFORMANCE=0 ZRAM=0 DOCKER_LOG=0 HOSTNAME_NEW='' TIMEZONE_NEW=''
 FAIL2BAN=0
+NETWORK_PROFILE=balanced BANDWIDTH_MBPS=0 RTT_MS=0 KEEP_BBR=0 DEFAULT_FQ=0 ENABLE_NTP=0
+NO_COLOR_OPTION=0 MODULE_INDEX=0 RUN_STARTED=-1
 ADMIN_USER='' PUBLIC_KEY='' DISABLE_PASSWORD=0 DISABLE_ROOT=0
 STATE=/var/lib/vps-init
 declare -a ALLOW=()
@@ -17,7 +19,9 @@ skip() {
 run_module() {
     local label=$1 enabled=$2
     shift 2
-    if (( ! enabled )); then printf '%s\t未启用\n' "$label" >> "$TX/results.tsv"; return; fi
+    MODULE_INDEX=$((MODULE_INDEX+1))
+    ui_section "[$MODULE_INDEX/11] $label"
+    if (( ! enabled )); then printf '%s\t未启用\n' "$label" >> "$TX/results.tsv"; say '未启用，保留现状。'; return; fi
     CURRENT_MODULE=$label MODULE_SKIP_COUNT=0
     # 不放入 if/|| 条件，避免 Bash 关闭被调用函数内部的 errexit。
     "$@"
@@ -29,6 +33,7 @@ run_module() {
 render_summary() {
     local code=$1 label status target='' old='' current='' user_name
     say ''; say '========== VPS Init 运行结果 =========='
+    if (( RUN_STARTED >= 0 )); then say "运行耗时：$((SECONDS-RUN_STARTED)) 秒"; fi
     if (( code )); then say "结果：执行失败（退出码 $code），未完成的步骤不可视为成功。"
     elif [[ -f $TX/rolled-back ]]; then say '结果：事务已回滚。'
     elif [[ -f $TX/access.pending ]]; then say '结果：配置流程已结束；SSH 仍待新连接确认。'
@@ -67,7 +72,9 @@ render_summary() {
     if [[ -f $TX/firewall.kind ]]; then say "本次防火墙后端：$(cat "$TX/firewall.kind")"; fi
     if has sysctl && current=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null); then
         say "TCP 当前拥塞算法：$current"
+        [[ $current != bbr ]] || say 'BBR 代际：内核未提供通用代际证明，不能仅凭 bbr 名称认定 v3。'
     fi
+    [[ ! -f $TX/network.profile ]] || say "网络调优计划：$(cat "$TX/network.profile")"
     if [[ -r /proc/swaps ]]; then
         current=$(awk 'NR>1 {total+=$3;used+=$4} END {printf "总量 %.0f MiB，已用 %.0f MiB",total/1024,used/1024}' /proc/swaps)
         say "当前 swap：$current"
@@ -96,8 +103,8 @@ finish_output() {
     trap - ERR EXIT
     set +e
     # 摘要独立保存，即使 run.log 已达容量上限仍可查看；保留原执行退出码。
-    render_summary "$code" > "$TX/summary.txt"
-    if [[ $? == 0 ]]; then cat "$TX/summary.txt"
+    UI_COLOR=0 render_summary "$code" > "$TX/summary.txt"
+    if [[ $? == 0 ]]; then ui_show_summary "$TX/summary.txt"
     else say "[错误] 无法完整保存运行摘要：$TX/summary.txt" >&2; fi
     exit "$code"
 }
@@ -117,9 +124,13 @@ parse_options() {
             --zram) ZRAM=1;;
             --docker-log-limit) DOCKER_LOG=1;;
             --fail2ban) FAIL2BAN=1;;
+            --keep-bbr) KEEP_BBR=1;;
+            --default-fq) DEFAULT_FQ=1;;
+            --enable-ntp) ENABLE_NTP=1;;
+            --no-color) NO_COLOR_OPTION=1;;
             --disable-password-login) DISABLE_PASSWORD=1;;
             --disable-root-login) DISABLE_ROOT=1;;
-            --ssh-port|--swap-mb|--allow|--hostname|--timezone|--admin-user|--public-key)
+            --ssh-port|--swap-mb|--allow|--hostname|--timezone|--admin-user|--public-key|--network-profile|--bandwidth-mbps|--rtt-ms)
                 [[ $# -ge 2 ]] || die "$1 缺少参数"
                 case $1 in
                     --ssh-port)
@@ -134,6 +145,10 @@ parse_options() {
                     --timezone) [[ $2 =~ ^[a-zA-Z0-9_+-]+(/[a-zA-Z0-9_+-]+)*$ ]] || die '无效时区'; TIMEZONE_NEW=$2;;
                     --admin-user) [[ $2 =~ ^[a-z_][a-z0-9_-]{0,30}$ && $2 != root ]] || die '需要非 root 的合法管理员用户名'; ADMIN_USER=$2;;
                     --public-key) PUBLIC_KEY=$2;;
+                    --network-profile)
+                        case $2 in conservative|balanced|throughput) NETWORK_PROFILE=$2;; *) die '网络档位：conservative/balanced/throughput';; esac;;
+                    --bandwidth-mbps) uint "$2" && (( 10#$2 >= 1 && 10#$2 <= 100000 )) || die '带宽范围 1–100000 Mbps'; BANDWIDTH_MBPS=$((10#$2));;
+                    --rtt-ms) uint "$2" && (( 10#$2 >= 1 && 10#$2 <= 2000 )) || die 'RTT 范围 1–2000 ms'; RTT_MS=$((10#$2));;
                 esac
                 shift;;
             *) die "未知选项：$1";;
@@ -141,6 +156,9 @@ parse_options() {
         shift
     done
     (( ! ZRAM || ! NO_SWAP )) || die '--zram 与 --no-swap 冲突'
+    if [[ $NETWORK_PROFILE == throughput ]]; then
+        (( BANDWIDTH_MBPS > 0 && RTT_MS > 0 )) || die 'throughput 需要 --bandwidth-mbps 和 --rtt-ms'
+    else (( BANDWIDTH_MBPS == 0 && RTT_MS == 0 )) || die '带宽/RTT 参数仅用于 throughput 档位'; fi
     if [[ -n $ADMIN_USER || -n $PUBLIC_KEY ]] || (( DISABLE_PASSWORD || DISABLE_ROOT )); then
         [[ -n $ADMIN_USER && -n $PUBLIC_KEY ]] || die '登录加固需要同时提供 --admin-user 与 --public-key'
         [[ -f $PUBLIC_KEY && -r $PUBLIC_KEY ]] || die '公钥文件不可读取'
@@ -219,6 +237,7 @@ begin_transaction() {
             print; fflush()
             if (used < limit) {
                 text=$0 ORS
+                gsub(/\033\[[0-9;]*m/, "", text)
                 remaining=limit-used
                 if (length(text)>remaining) text=substr(text,1,remaining)
                 printf "%s",text >> logfile
@@ -294,6 +313,9 @@ show_plan() {
     say '一键计划：日志轮转、内存/swap、TCP/UDP/BBR、安全基线、磁盘维护、SSH/防火墙。'
     say "SSH：$SSH_PORT（保留现端口=$KEEP_SSH）；swap：$SWAP_MB MiB（禁用=$NO_SWAP；zram=$ZRAM）。"
     say "安装工具=$INSTALL；安全更新=$UPDATES；CPU performance=$CPU_PERFORMANCE；Docker 日志=$DOCKER_LOG。"
+    say "网络档位=$NETWORK_PROFILE；缓冲目标=$(network_buffer_target) 字节；保留拥塞算法=$KEEP_BBR；默认 FQ=$DEFAULT_FQ。"
+    (( ! DEFAULT_FQ )) || say '默认 FQ 只影响之后创建队列的设备；不会替换现有 tc 队列树。'
+    say "启用已安装的时间同步服务=$ENABLE_NTP。"
     say '适用模块才执行；已有服务/转发/防火墙冲突会跳过并说明；不会自动重启机器。'
     say 'SSH 变更需从新端口重新登录确认；云安全组和 NAT 映射需由你放行。'
     if [[ -n $ADMIN_USER ]]; then say "登录加固：管理员 $ADMIN_USER，配置公钥和免密码 sudo；新公钥登录确认后才关闭指定认证方式。"; fi
@@ -390,6 +412,7 @@ rollback() {
         [[ ! -f $TX/logs.changed ]] || systemctl restart systemd-journald
         [[ ! -f $TX/hostname.before ]] || hostnamectl set-hostname "$(cat "$TX/hostname.before")"
         [[ ! -f $TX/timezone.before ]] || timedatectl set-timezone "$(cat "$TX/timezone.before")"
+        [[ ! -f $TX/ntp.before ]] || timedatectl set-ntp "$(cat "$TX/ntp.before")"
         if [[ -f $TX/fstrim.before && $(cat "$TX/fstrim.before") == disabled ]]; then systemctl disable fstrim.timer; fi
         if [[ -f $TX/fstrim.active && $(cat "$TX/fstrim.active") != active ]]; then systemctl stop fstrim.timer; fi
         if [[ -f $TX/fail2ban.active ]]; then

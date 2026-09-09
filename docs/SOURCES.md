@@ -2,6 +2,8 @@
 
 查阅日期：2026-09-09。以下资料用于理解接口和约束，不代表已逐行审计其整个项目。
 
+新增四个一键脚本项目的固定提交、实际审阅路径及采用边界见 [参考项目复核](REFERENCE-REVIEW.md)。
+
 | 来源 | 用途 |
 | --- | --- |
 | [Linux IP Sysctl](https://kernel.org/doc/html/latest/networking/ip-sysctl.html) | TCP 自动调节、缓冲单位、UDP 参数、拥塞控制 |

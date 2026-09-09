@@ -9,6 +9,15 @@ install_tools() {
     esac
 }
 basic_init() {
+    if (( ENABLE_NTP )); then
+        if [[ $INIT == systemd ]] && has timedatectl && [[ $(timedatectl show -p CanNTP --value) == yes ]]; then
+            local previous_ntp
+            previous_ntp=$(timedatectl show -p NTP --value)
+            [[ $previous_ntp == yes || $previous_ntp == no ]] || die '无法读取原时间同步状态'
+            printf '%s\n' "$previous_ntp" > "$TX/ntp.before"
+            timedatectl set-ntp true
+        else skip '未发现可由 timedatectl 管理的时间同步服务'; fi
+    fi
     if [[ -n $HOSTNAME_NEW ]]; then
         if has hostnamectl && [[ $INIT == systemd ]]; then
             hostnamectl --static > "$TX/hostname.before"
@@ -120,6 +129,7 @@ configure_zram() {
     write_file /usr/local/sbin/vps-init-zram <<EOF
 #!/bin/sh
 set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
 case "\${1:-start}" in
 start)
     modprobe zram num_devices=1
@@ -184,6 +194,7 @@ configure_cpu() {
     write_file /usr/local/sbin/vps-init-cpu <<'EOF'
 #!/bin/sh
 set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
 for path in /sys/devices/system/cpu/cpufreq/policy*/scaling_governor; do
     [ -w "$path" ] || continue
     grep -qw performance "${path%/*}/scaling_available_governors" || continue
@@ -215,13 +226,53 @@ EOF
     fi
     say 'CPU performance 已应用，并添加开机配置。'
 }
+network_buffer_target() {
+    local amount=4194304 budget=$((RAM_MB*1048576/32))
+    (( RAM_MB < 1024 )) || amount=8388608
+    (( RAM_MB < 4096 )) || amount=16777216
+    case $NETWORK_PROFILE in
+        conservative) amount=$((amount/2));;
+        throughput)
+            # Mbps × ms × 250 = 两个带宽时延积（字节）。带宽/RTT 由用户提供。
+            amount=$((BANDWIDTH_MBPS*RTT_MS*250))
+            (( amount >= 1048576 )) || amount=1048576
+            ;;
+    esac
+    (( budget <= 134217728 )) || budget=134217728
+    (( budget >= 1048576 )) || budget=1048576
+    (( amount <= budget )) || amount=$budget
+    printf '%s\n' "$amount"
+}
+network_status() {
+    ui_section '网络与 BBR / BBRv3 检查（只读）'
+    say "内核：$(uname -r)；架构：$(uname -m)；可见内存：$RAM_MB MiB"
+    local current available
+    current=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || printf unknown)
+    available=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || printf unknown)
+    say "当前算法：$current；已加载可用算法：$available"
+    if [[ $current == bbr* && $current != bbr ]]; then say '发现第三方 BBR 变体，默认不接管网络调优。'; fi
+    say 'BBRv3 需要内核实现；标准名称 bbr 不提供可通用验证的代际信息。'
+    say '脚本可使用现有内核中的标准 bbr，不安装第三方内核、不自动重启。'
+    say "档位：$NETWORK_PROFILE；目标缓冲上限：$(network_buffer_target) 字节（保留更大现值）"
+    if [[ $NETWORK_PROFILE == throughput ]]; then say "计算输入：$BANDWIDTH_MBPS Mbps / $RTT_MS ms；这是人工输入，不是测速结果。"; fi
+    sysctl net.core.rmem_max net.core.wmem_max net.ipv4.tcp_rmem net.ipv4.tcp_wmem net.core.default_qdisc 2>/dev/null || true
+    if has ip; then say '当前默认路由：'; ip -4 route show default; ip -6 route show default; fi
+    if has tc; then say '实际队列树：'; tc qdisc show; fi
+    if has nstat; then say '累计重传/UDP 丢包计数：'; nstat -az TcpRetransSegs UdpInErrors UdpRcvbufErrors; fi
+    say '不根据虚拟网卡标称速率推定套餐带宽；不会发送测速流量。'
+}
 configure_network() {
     (( ! LIMITED )) || { skip '容器不修改宿主机网络参数'; return; }
+    local current
+    current=$(sysctl -n net.ipv4.tcp_congestion_control)
+    if (( ! KEEP_BBR )) && [[ $current == bbr* && $current != bbr ]]; then
+        skip "当前使用 $current，保留第三方变体及其网络参数；可显式 --keep-bbr 只调整缓冲"; return
+    fi
     SYSCTL_TEMP="$TX/sysctl.new"
     : > "$SYSCTL_TEMP"
-    local max=4194304
-    (( RAM_MB < 1024 )) || max=8388608
-    (( RAM_MB < 4096 )) || max=16777216
+    local max
+    max=$(network_buffer_target)
+    printf '%s；缓冲目标 %s 字节；带宽 %s Mbps / RTT %s ms（0 为未提供）\n' "$NETWORK_PROFILE" "$max" "$BANDWIDTH_MBPS" "$RTT_MS" > "$TX/network.profile"
     # 只提高上限；不降低机器已有的更大缓冲，不抬高每连接初始分配。
     local key old
     for key in net.core.rmem_max net.core.wmem_max; do
@@ -234,11 +285,21 @@ configure_network() {
         IFS=$' \t' read -r low normal high <<< "$(sysctl -n "$key")"
         if (( high < max )); then set_sysctl "$key" "$low $normal $max"; fi
     done
-    if has modprobe; then modprobe tcp_bbr 2>/dev/null || true; fi
-    if sysctl -n net.ipv4.tcp_available_congestion_control | grep -qw bbr; then
-        set_sysctl net.ipv4.tcp_congestion_control bbr
-        say '已启用内核提供的 bbr；不据此猜测 BBR 版本。'
-    else skip '当前内核无 BBR；不下载替换内核'; fi
+    if (( KEEP_BBR )); then say "保留当前拥塞算法 $current"
+    else
+        if has modprobe; then modprobe tcp_bbr 2>/dev/null || true; fi
+        local available
+        available=$(sysctl -n net.ipv4.tcp_available_congestion_control)
+        if grep -qw bbr <<< "$available"; then
+            set_sysctl net.ipv4.tcp_congestion_control bbr
+            say '已请求启用内核提供的 bbr；实际值见结束摘要，代际不可仅凭名称判断。'
+        else skip '当前内核无 BBR；不下载替换内核'; fi
+    fi
+    if (( DEFAULT_FQ )); then
+        if has modprobe; then modprobe sch_fq 2>/dev/null || true; fi
+        set_sysctl net.core.default_qdisc fq
+        say '已请求默认 FQ，仅作用于后续创建的队列；当前 tc 队列树保留。'
+    fi
     # 不替换当前 tc 层级：可能存在提供商限速、VPN 或用户队列。
     say '保留现有 qdisc、MTU、TCP 重传、UDP 超时及转发配置。'
     local managed=/etc/sysctl.d/60-vps-init-network.conf

@@ -102,7 +102,7 @@ ok '全局加固拒绝 Match、递归 Include 覆盖和循环'
 
 TX="$WORK/summary-tx" TXID=20260909T000000Z-1234 RUN_ACTION=optimize
 mkdir "$TX"
-# shellcheck disable=SC2329 # run_module 按参数间接调用
+# shellcheck disable=SC2329,SC2317 # run_module 按参数间接调用，兼容不同 ShellCheck 版本
 test_skipped_module() { skip '没有可写接口'; }
 run_module CPU 1 test_skipped_module
 run_module Docker 0 test_skipped_module
@@ -144,4 +144,30 @@ else [[ $? == 1 ]]; fi
 grep -Fq '执行失败（退出码 1）' "$WORK/failure-tx/summary.txt"
 grep -Fq '失败模块：失败或中断' "$WORK/failure-tx/summary.txt"
 ok '失败模块立即终止并保存失败摘要，退出码保持不变'
+
+RAM_MB=256 NETWORK_PROFILE=balanced
+[[ $(network_buffer_target) == 4194304 ]]
+NETWORK_PROFILE=conservative
+[[ $(network_buffer_target) == 2097152 ]]
+NETWORK_PROFILE=throughput BANDWIDTH_MBPS=1000 RTT_MS=100 RAM_MB=4096
+[[ $(network_buffer_target) == 25000000 ]]
+RAM_MB=256
+[[ $(network_buffer_target) == 8388608 ]]
+RAM_MB=65536 BANDWIDTH_MBPS=100000 RTT_MS=2000
+[[ $(network_buffer_target) == 134217728 ]]
+if (parse_options --bandwidth-mbps '100;id') >/dev/null 2>&1; then exit 1; fi
+if (parse_options --rtt-ms 2001) >/dev/null 2>&1; then exit 1; fi
+if (BANDWIDTH_MBPS=0; parse_options --network-profile throughput) >/dev/null 2>&1; then exit 1; fi
+NETWORK_PROFILE=balanced BANDWIDTH_MBPS=0 RTT_MS=0
+ok '网络档位、BDP 单位、内存预算、溢出边界及输入拒绝'
+
+DIST=ubuntu VERSION=24.04 INIT=systemd VIRT=kvm UI_COLOR=0
+ui_menu_body > "$WORK/menu"
+grep -Fq '一键优化' "$WORK/menu"
+grep -Fq '公钥管理员向导' "$WORK/menu"
+grep -Fq '事务记录及结果' "$WORK/menu"
+if grep -q $'\033' "$WORK/menu"; then exit 1; fi
+if (ui_menu </dev/null) > "$WORK/menu-error" 2>&1; then exit 1; fi
+grep -Fq '菜单需要交互终端' "$WORK/menu-error"
+ok '中文菜单纯文本降级及非交互调用拒绝'
 printf '%s checks passed\n' "$passed"
